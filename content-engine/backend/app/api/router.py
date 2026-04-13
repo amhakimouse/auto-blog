@@ -1,9 +1,10 @@
 """
 app/api/router.py — Top-level API router that aggregates all versioned routes.
 """
+
 from fastapi import APIRouter
 
-from app.api.v1 import articles, auth, events, integrations, jobs
+from app.api.v1 import articles, auth, events, integrations, jobs, dashboard
 
 api_router = APIRouter()
 
@@ -34,4 +35,9 @@ api_router.include_router(
     events.router,
     prefix="/events",
     tags=["events"],
+)
+api_router.include_router(
+    dashboard.router,
+    prefix="/dashboard",
+    tags=["dashboard"],
 )

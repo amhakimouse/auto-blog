@@ -1,0 +1,10 @@
+export { LoginPage } from './Login';
+export { RegisterPage } from './Register';
+export { DashboardPage } from './Dashboard';
+export { JobsPage } from './Jobs';
+export { JobDetailPage } from './JobDetail';
+export { ArticlesPage } from './Articles';
+export { ArticleDetailPage } from './ArticleDetail';
+export { ArticleEditPage } from './ArticleEdit';
+export { IntegrationsPage } from './Integrations';
+export { SettingsPage } from './Settings';

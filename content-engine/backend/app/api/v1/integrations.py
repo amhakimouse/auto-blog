@@ -20,6 +20,7 @@ Design:
   - existing_post_links (the WP link cache) is a read-only field in responses;
     it is populated by the `sync_wp_links` Celery task.
 """
+
 from __future__ import annotations
 
 import uuid
@@ -46,16 +47,31 @@ router = APIRouter()
 # Defined locally to keep the module self-contained; move to app/schemas/ if
 # they need to be shared with other modules.
 
+
 class IntegrationCreate(BaseModel):
     """Request body for creating a new Integration."""
-    site_name: str = Field(..., min_length=1, max_length=255,
-                           description="Human-readable label, e.g. 'TechCorp Blog'")
-    wp_url: str = Field(..., min_length=10, max_length=500,
-                        description="WordPress site root URL (no trailing slash)")
-    wp_username: str = Field(..., min_length=1, max_length=255,
-                             description="WordPress user login name")
-    wp_password: str = Field(..., min_length=1, max_length=512,
-                             description="WordPress Application Password (stored encrypted)")
+
+    site_name: str = Field(
+        ...,
+        min_length=1,
+        max_length=255,
+        description="Human-readable label, e.g. 'TechCorp Blog'",
+    )
+    wp_url: str = Field(
+        ...,
+        min_length=10,
+        max_length=500,
+        description="WordPress site root URL (no trailing slash)",
+    )
+    wp_username: str = Field(
+        ..., min_length=1, max_length=255, description="WordPress user login name"
+    )
+    wp_password: str = Field(
+        ...,
+        min_length=1,
+        max_length=512,
+        description="WordPress Application Password (stored encrypted)",
+    )
     brand_voice_prompt: str | None = Field(
         default=None,
         max_length=4000,
@@ -65,21 +81,29 @@ class IntegrationCreate(BaseModel):
 
 class IntegrationUpdate(BaseModel):
     """Request body for a full PUT update — all fields required."""
+
     site_name: str = Field(..., min_length=1, max_length=255)
     wp_url: str = Field(..., min_length=10, max_length=500)
     wp_username: str = Field(..., min_length=1, max_length=255)
-    wp_password: str = Field(..., min_length=1, max_length=512,
-                             description="New WordPress Application Password (stored encrypted)")
+    wp_password: str = Field(
+        ...,
+        min_length=1,
+        max_length=512,
+        description="New WordPress Application Password (stored encrypted)",
+    )
     brand_voice_prompt: str | None = Field(default=None, max_length=4000)
 
 
 class IntegrationPatch(BaseModel):
     """Request body for a partial PATCH update — all fields optional."""
+
     site_name: str | None = Field(default=None, min_length=1, max_length=255)
     wp_url: str | None = Field(default=None, min_length=10, max_length=500)
     wp_username: str | None = Field(default=None, min_length=1, max_length=255)
     wp_password: str | None = Field(
-        default=None, min_length=1, max_length=512,
+        default=None,
+        min_length=1,
+        max_length=512,
         description="Provide only if you want to rotate the WordPress Application Password.",
     )
     brand_voice_prompt: str | None = Field(default=None, max_length=4000)
@@ -87,6 +111,7 @@ class IntegrationPatch(BaseModel):
 
 class IntegrationRead(BaseModel):
     """Public representation of an Integration — wp_password is never included."""
+
     model_config = {"from_attributes": True}
 
     id: uuid.UUID
@@ -94,8 +119,10 @@ class IntegrationRead(BaseModel):
     site_name: str
     wp_url: str
     wp_username: str
+    is_connected: bool = Field(
+        default=False, description="Whether the connection was successfully tested"
+    )
     brand_voice_prompt: str | None
-    # Number of cached internal links (count only — not the full dict)
     cached_link_count: int = Field(
         default=0,
         description="Number of slug→URL pairs currently cached from WordPress.",
@@ -112,6 +139,7 @@ class IntegrationRead(BaseModel):
             "site_name": integration.site_name,
             "wp_url": integration.wp_url,
             "wp_username": integration.wp_username,
+            "is_connected": False,
             "brand_voice_prompt": integration.brand_voice_prompt,
             "cached_link_count": len(integration.existing_post_links or {}),
             "created_at": integration.created_at,
@@ -121,6 +149,7 @@ class IntegrationRead(BaseModel):
 
 
 # ── Helper ────────────────────────────────────────────────────────────────────
+
 
 async def _get_owned_integration(
     integration_id: uuid.UUID,
@@ -144,6 +173,7 @@ async def _get_owned_integration(
 
 
 # ── POST /integrations ────────────────────────────────────────────────────────
+
 
 @router.post(
     "",
@@ -186,6 +216,7 @@ async def create_integration(
 
 # ── GET /integrations ─────────────────────────────────────────────────────────
 
+
 @router.get(
     "",
     response_model=list[IntegrationRead],
@@ -199,6 +230,7 @@ async def list_integrations(
 ) -> list[IntegrationRead]:
     """Return all Integrations belonging to the authenticated user, newest first."""
     from sqlalchemy import desc
+
     result = await db.execute(
         select(Integration)
         .where(Integration.user_id == user.id)
@@ -211,6 +243,7 @@ async def list_integrations(
 
 
 # ── GET /integrations/{integration_id} ───────────────────────────────────────
+
 
 @router.get(
     "/{integration_id}",
@@ -227,6 +260,7 @@ async def get_integration(
 
 
 # ── PUT /integrations/{integration_id} ───────────────────────────────────────
+
 
 @router.put(
     "/{integration_id}",
@@ -250,11 +284,14 @@ async def update_integration(
     await db.commit()
     await db.refresh(integration)
 
-    log.info("integrations.updated", integration_id=str(integration_id), user_id=str(user.id))
+    log.info(
+        "integrations.updated", integration_id=str(integration_id), user_id=str(user.id)
+    )
     return IntegrationRead.from_orm_with_link_count(integration)
 
 
 # ── PATCH /integrations/{integration_id} ─────────────────────────────────────
+
 
 @router.patch(
     "/{integration_id}",
@@ -283,11 +320,14 @@ async def patch_integration(
     await db.commit()
     await db.refresh(integration)
 
-    log.info("integrations.patched", integration_id=str(integration_id), user_id=str(user.id))
+    log.info(
+        "integrations.patched", integration_id=str(integration_id), user_id=str(user.id)
+    )
     return IntegrationRead.from_orm_with_link_count(integration)
 
 
 # ── DELETE /integrations/{integration_id} ────────────────────────────────────
+
 
 @router.delete(
     "/{integration_id}",
@@ -306,4 +346,44 @@ async def delete_integration(
     integration = await _get_owned_integration(integration_id, user, db)
     await db.delete(integration)
     await db.commit()
-    log.info("integrations.deleted", integration_id=str(integration_id), user_id=str(user.id))
+    log.info(
+        "integrations.deleted", integration_id=str(integration_id), user_id=str(user.id)
+    )
+
+
+# ── POST /integrations/{integration_id}/test ───────────────────────────────────
+
+
+@router.post(
+    "/{integration_id}/test",
+    summary="Test WordPress connection",
+)
+async def test_integration(
+    integration_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_active_user),
+) -> dict:
+    """
+    Test the WordPress integration credentials by attempting to fetch
+    the site info via the REST API.
+    """
+    integration = await _get_owned_integration(integration_id, user, db)
+
+    from app.integrations.wordpress import WordPressPublisher
+
+    try:
+        publisher = WordPressPublisher(
+            wp_site_url=integration.wp_url,
+            wp_username=integration.wp_username,
+            wp_app_password=integration.wp_password,
+        )
+        await publisher.get_site_info()
+        return {"success": True, "message": "Connection successful"}
+    except Exception as e:
+        log.warning(
+            "integrations.test_failed", integration_id=str(integration_id), error=str(e)
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Connection failed: {str(e)}",
+        )
