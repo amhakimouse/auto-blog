@@ -1,7 +1,8 @@
 """
-app/api/v1/articles.py — Article retrieval and publish endpoints.
+app/api/v1/articles.py — Article retrieval, list, and publish endpoints.
 
 Endpoints:
+  GET  /articles                        — list articles for the current user (paginated)
   GET  /articles/{article_id}           — retrieve an article by ID
   GET  /articles/by-job/{job_id}        — retrieve the article for a job
   POST /articles/{article_id}/publish   — editor review → WordPress publish
@@ -19,10 +20,11 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import datetime, timezone
+from typing import Annotated
 
 import bleach
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_current_active_user
@@ -57,7 +59,52 @@ _ALLOWED_ATTRS = {
 }
 
 
-# ── GET /articles/{article_id} ────────────────────────────────────────────────
+# ── GET /articles ──────────────────────────────────────────────────────────────────
+
+@router.get(
+    "",
+    response_model=list[ArticleRead],
+    summary="List articles for the current user (newest first)",
+)
+async def list_articles(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_active_user),
+    limit: Annotated[int, Query(ge=1, le=100, description="Max records to return")] = 20,
+    offset: Annotated[int, Query(ge=0, description="Pagination offset")] = 0,
+    status_filter: Annotated[
+        str | None,
+        Query(alias="status", description="Filter by article_status (e.g. 'draft_ready', 'published')")
+    ] = None,
+) -> list[Article]:
+    """
+    Return a paginated list of articles belonging to the authenticated user,
+    ordered by `created_at` descending (newest first).
+
+    Optionally filter by `status` query parameter:
+      - `?status=draft_ready`   — awaiting review
+      - `?status=published`     — live on WordPress
+      - `?status=scheduled`     — scheduled for future publish
+      - `?status=publish_failed` — failed to push to WordPress
+
+    Use `limit` and `offset` to paginate:
+      - Page 1: `?limit=20&offset=0`
+      - Page 2: `?limit=20&offset=20`
+    """
+    query = (
+        select(Article)
+        .where(Article.user_id == user.id)
+        .order_by(desc(Article.created_at))
+        .limit(limit)
+        .offset(offset)
+    )
+    if status_filter:
+        query = query.where(Article.article_status == status_filter)
+
+    result = await db.execute(query)
+    return list(result.scalars().all())
+
+
+# ── GET /articles/{article_id} ─────────────────────────────────────────────────
 
 @router.get(
     "/{article_id}",

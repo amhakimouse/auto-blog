@@ -1,8 +1,9 @@
 """
-app/api/v1/jobs.py — Job creation, status, cancel, and bulk-queue endpoints.
+app/api/v1/jobs.py — Job creation, status, cancel, bulk-queue, and list endpoints.
 
 Endpoints:
   POST   /jobs          — create one job (credits check + billing)
+  GET    /jobs          — list jobs for the authenticated user (paginated)
   GET    /jobs/{job_id} — poll status (scoped to auth user)
   DELETE /jobs/{job_id} — cancel a pending/processing job
   POST   /jobs/bulk     — enqueue up to 50 jobs against one Integration
@@ -18,10 +19,11 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from jose import jwt
 from slowapi import Limiter
 from slowapi.util import get_remote_address
-from sqlalchemy import select
+from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_current_active_user
@@ -40,8 +42,22 @@ log = get_logger(__name__)
 
 router = APIRouter()
 
-limiter = Limiter(key_func=get_remote_address)
-_RATE_LIMIT = f"{settings.rate_limit_requests}/hour"
+def user_id_or_ip(request: Request) -> str:
+    auth = request.headers.get("Authorization")
+    if auth and auth.startswith("Bearer "):
+        token = auth.split(" ")[1]
+        try:
+            from app.security.auth import ALGORITHM
+            payload = jwt.decode(token, settings.secret_key, algorithms=[ALGORITHM])
+            user_id = payload.get("sub")
+            if user_id:
+                return f"user:{user_id}"
+        except Exception:
+            pass
+    return get_remote_address(request)
+
+limiter = Limiter(key_func=user_id_or_ip)
+_RATE_LIMIT = "10/minute"
 
 # ── Task name mapping (shared by single and bulk creation) ────────────────────
 _TASK_MAP: dict[WorkflowType, str] = {
@@ -261,7 +277,40 @@ async def create_bulk_jobs(
     )
 
 
-# ── GET /jobs/{job_id} ────────────────────────────────────────────────────────
+# ── GET /jobs ────────────────────────────────────────────────────────────────────
+
+from typing import Annotated
+
+@router.get(
+    "",
+    response_model=list[JobRead],
+    summary="List jobs for the current user (newest first)",
+)
+async def list_jobs(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_active_user),
+    limit: Annotated[int, Query(ge=1, le=100, description="Max records to return")] = 20,
+    offset: Annotated[int, Query(ge=0, description="Pagination offset")] = 0,
+) -> list[Job]:
+    """
+    Return a paginated list of jobs belonging to the authenticated user,
+    ordered by `created_at` descending (newest first).
+
+    Use `limit` and `offset` to paginate:
+      - Page 1: `?limit=20&offset=0`
+      - Page 2: `?limit=20&offset=20`
+    """
+    result = await db.execute(
+        select(Job)
+        .where(Job.user_id == user.id)
+        .order_by(desc(Job.created_at))
+        .limit(limit)
+        .offset(offset)
+    )
+    return list(result.scalars().all())
+
+
+# ── GET /jobs/{job_id} ──────────────────────────────────────────────────────────────
 
 @router.get(
     "/{job_id}",

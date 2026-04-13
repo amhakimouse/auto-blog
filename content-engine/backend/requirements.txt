@@ -27,10 +27,11 @@ trafilatura==1.10.*               # boilerplate-stripping article extractor
 beautifulsoup4==4.12.*
 lxml==5.2.*                       # fast HTML parser backend for bs4 / trafilatura
 
-# ── Security ─────────────────────────────────────────────────────────────────
+# ── Security ─────────────────────────────────────────────────────────────────────
 bleach==6.1.*                     # HTML sanitizer (XSS prevention)
 python-jose[cryptography]==3.3.*  # JWT tokens for auth (future)
 passlib[bcrypt]==1.7.*            # password hashing (future)
+cryptography==42.*                # Fernet AES encryption for WP passwords (Integration model)
 
 # ── Rate Limiting ─────────────────────────────────────────────────────────────
 slowapi==0.1.*                    # Starlette/FastAPI rate limiter

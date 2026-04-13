@@ -19,9 +19,12 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
+import redis.asyncio as redis
+from sqlalchemy import text
+
 from app.api.router import api_router
 from app.config import settings
-from app.database import create_all_tables
+from app.database import create_all_tables, engine
 from app.logger import get_logger
 
 log = get_logger(__name__)
@@ -91,7 +94,20 @@ def create_app() -> FastAPI:
 
     @app.get("/readiness", tags=["ops"], include_in_schema=False)
     async def readiness(request: Request) -> JSONResponse:
-        # TODO: add DB + Redis connectivity checks
+        try:
+            async with engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
+
+            r = redis.from_url(settings.redis_url)
+            await r.ping()
+            await r.close()
+        except Exception as exc:
+            log.error("readiness.failed", error=str(exc))
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"status": "unavailable", "detail": str(exc)}
+            )
+
         return JSONResponse({"status": "ready"})
 
     return app

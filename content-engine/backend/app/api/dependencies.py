@@ -16,7 +16,7 @@ from app.models.user import User
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.api_v1_prefix}/auth/login")
 
-ALGORITHM = "HS256"
+from app.security.auth import ALGORITHM
 
 
 async def get_current_user(

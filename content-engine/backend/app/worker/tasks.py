@@ -371,25 +371,56 @@ def sync_wp_links(self, integration_id: str) -> dict:
             logger.warning("sync_wp_links.integration_not_found")
             return {"error": "Integration not found", "integration_id": integration_id}
 
-        # ── STUB ──────────────────────────────────────────────────
-        # TODO: Replace with real WordPress REST API call:
-        #   GET {integration.wp_url}/wp-json/wp/v2/posts
-        #       ?per_page=100&page={n}&status=publish&_fields=slug,link
-        # Paginate through all pages, accumulate {slug: link} dict,
-        # then write to integration.existing_post_links.
-        # ─────────────────────────────────────────────────────────
+        import httpx
+
+        post_links = {}
+        page = 1
+        per_page = 100
+        base_url = integration.wp_url.rstrip("/")
+        api_url = f"{base_url}/wp-json/wp/v2/posts"
+
+        try:
+            with httpx.Client(timeout=30.0) as client:
+                while True:
+                    response = client.get(
+                        api_url,
+                        params={
+                            "status": "publish",
+                            "_fields": "slug,link",
+                            "per_page": per_page,
+                            "page": page,
+                        }
+                    )
+                    response.raise_for_status()
+                    posts = response.json()
+
+                    if not posts:
+                        break
+
+                    for post in posts:
+                        if "slug" in post and "link" in post:
+                            post_links[post["slug"]] = post["link"]
+
+                    total_pages = int(response.headers.get("X-WP-TotalPages", 1))
+                    if page >= total_pages:
+                        break
+                    page += 1
+
+        except httpx.HTTPError as exc:
+            logger.error("sync_wp_links.http_error", error=str(exc))
+            return {"error": str(exc), "integration_id": integration_id}
+        except Exception as exc:
+            logger.error("sync_wp_links.unexpected_error", error=str(exc))
+            return {"error": str(exc), "integration_id": integration_id}
+
         synced_at = datetime.now(timezone.utc).isoformat()
-        integration.existing_post_links = {
-            "__stub__": True,
-            "__synced_at__": synced_at,
-            "__note__": "Replace stub with real WP REST API pagination",
-        }
+        integration.existing_post_links = post_links
         integration.updated_at = datetime.now(timezone.utc)
         db.commit()
 
     result = {
         "integration_id": integration_id,
-        "post_count": 0,    # will be real count once stub is replaced
+        "post_count": len(post_links),
         "synced_at": synced_at,
     }
     logger.info("sync_wp_links.done", **result)

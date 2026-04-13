@@ -106,6 +106,22 @@ services:
     profiles:
       - scheduler   # only starts when: docker compose --profile scheduler up
 
+  # ── Celery Flower (monitoring) ──────────────────────────────────────────────
+  flower:
+    <<: *backend-common
+    command: >
+      celery -A app.worker.celery_app flower
+      --port=5555
+    ports:
+      - "5555:5555"
+    depends_on:
+      redis:
+        condition: service_healthy
+      worker:
+        condition: service_started
+    networks:
+      - internal
+
   # ── React Frontend ──────────────────────────────────────────────────────────
   frontend:
     build:
