@@ -1,21 +1,23 @@
 """
 app/schemas/article.py — Pydantic schemas for Article request / response payloads.
 """
+
 from __future__ import annotations
 
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer
 
 
 class ArticleRead(BaseModel):
     """Full article representation returned by GET endpoints."""
+
     model_config = {"from_attributes": True}
 
-    id: uuid.UUID
-    job_id: uuid.UUID
-    integration_id: uuid.UUID | None
+    id: str
+    job_id: str
+    integration_id: str | None
     article_status: str
     title: str
     slug: str | None
@@ -43,6 +45,7 @@ class ArticlePublishRequest(BaseModel):
     Set scheduled_publish_at to defer publishing; omit / set to null to publish
     immediately via the synchronous WordPressPublisher call.
     """
+
     html_content: str = Field(
         ...,
         min_length=1,

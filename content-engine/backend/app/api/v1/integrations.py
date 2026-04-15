@@ -28,7 +28,7 @@ from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, field_serializer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -114,8 +114,8 @@ class IntegrationRead(BaseModel):
 
     model_config = {"from_attributes": True}
 
-    id: uuid.UUID
-    user_id: uuid.UUID
+    id: str
+    user_id: str
     site_name: str
     wp_url: str
     wp_username: str
@@ -134,8 +134,8 @@ class IntegrationRead(BaseModel):
     def from_orm_with_link_count(cls, integration: Integration) -> "IntegrationRead":
         """Build the response, computing cached_link_count from the JSONB field."""
         data = {
-            "id": integration.id,
-            "user_id": integration.user_id,
+            "id": str(integration.id),
+            "user_id": str(integration.user_id),
             "site_name": integration.site_name,
             "wp_url": integration.wp_url,
             "wp_username": integration.wp_username,
@@ -338,7 +338,7 @@ async def delete_integration(
     integration_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_active_user),
-) -> None:
+):
     """
     Permanently delete an Integration.
     The DB cascade (ondelete='CASCADE') will remove all child Jobs and Articles.

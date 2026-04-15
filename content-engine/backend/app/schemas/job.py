@@ -1,29 +1,31 @@
 """
 app/schemas/job.py — Pydantic schemas for Job request / response payloads.
 """
-from __future__ import annotations
 
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, Field, HttpUrl, model_validator
+from pydantic import BaseModel, Field, HttpUrl, field_serializer, model_validator
 
 from app.models.job import JobStatus, WorkflowType
 
 
 class RelatedArticle(BaseModel):
     """A related article used for internal linking injection."""
+
     title: str = Field(..., min_length=2, max_length=300)
     url: str = Field(..., min_length=5, max_length=2048)
 
 
 # ── Single-job request ────────────────────────────────────────────────────────
 
+
 class JobCreate(BaseModel):
     """
     Used as the POST /api/v1/jobs request body.
     Exactly ONE of keyword or reference_url must be provided.
     """
+
     workflow_type: WorkflowType
     keyword: str | None = Field(
         default=None,
@@ -62,7 +64,7 @@ class JobCreate(BaseModel):
     )
 
     @model_validator(mode="after")
-    def check_workflow_input(self) -> "JobCreate":
+    def check_workflow_input(self):
         if self.workflow_type == WorkflowType.KEYWORD_TO_ARTICLE:
             if not self.keyword:
                 raise ValueError(
@@ -78,11 +80,13 @@ class JobCreate(BaseModel):
 
 # ── Bulk-job request ──────────────────────────────────────────────────────────
 
+
 class BulkJobItem(BaseModel):
     """
     One item inside a bulk job submission.
     Exactly ONE of keyword or reference_url must be provided.
     """
+
     workflow_type: WorkflowType
     keyword: str | None = Field(default=None, min_length=2, max_length=200)
     reference_url: HttpUrl | None = None
@@ -91,18 +95,24 @@ class BulkJobItem(BaseModel):
     def check_item_input(self) -> "BulkJobItem":
         if self.workflow_type == WorkflowType.KEYWORD_TO_ARTICLE and not self.keyword:
             raise ValueError("keyword required for keyword_to_article")
-        if self.workflow_type == WorkflowType.REFERENCE_TO_ARTICLE and not self.reference_url:
+        if (
+            self.workflow_type == WorkflowType.REFERENCE_TO_ARTICLE
+            and not self.reference_url
+        ):
             raise ValueError("reference_url required for reference_to_article")
         return self
 
 
 class BulkJobCreate(BaseModel):
     """POST /api/v1/jobs/bulk request body."""
+
     integration_id: uuid.UUID = Field(
         ..., description="Brand Profile all jobs in this batch are assigned to."
     )
     items: list[BulkJobItem] = Field(
-        ..., min_length=1, max_length=50,
+        ...,
+        min_length=1,
+        max_length=50,
         description="Between 1 and 50 job definitions.",
     )
     # Image config applied uniformly to all items in the batch
@@ -112,17 +122,28 @@ class BulkJobCreate(BaseModel):
 
 class BulkJobRead(BaseModel):
     """Summary returned immediately after a bulk submission."""
+
     integration_id: uuid.UUID
     queued: int
     failed_validation: int
     job_ids: list[uuid.UUID]
     errors: list[str]
 
+    @field_serializer("integration_id")
+    def serialize_integration_id(self, value: uuid.UUID) -> str:
+        return str(value)
+
+    @field_serializer("job_ids")
+    def serialize_job_ids(self, value: list[uuid.UUID]) -> list[str]:
+        return [str(x) for x in value]
+
 
 # ── Single-job response ───────────────────────────────────────────────────────
 
+
 class JobRead(BaseModel):
     """Minimal representation returned immediately after job creation."""
+
     model_config = {"from_attributes": True}
 
     id: uuid.UUID
@@ -137,6 +158,14 @@ class JobRead(BaseModel):
     created_at: datetime
     updated_at: datetime
     completed_at: datetime | None
+
+    @field_serializer("id")
+    def serialize_id(self, value: uuid.UUID) -> str:
+        return str(value)
+
+    @field_serializer("integration_id")
+    def serialize_integration_id(self, value: uuid.UUID | None) -> str | None:
+        return str(value) if value else None
 
 
 # ── Internal status update (used by worker, not exposed) ──────────────────────

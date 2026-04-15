@@ -14,7 +14,7 @@ Design decisions:
     SSRF-invalid URLs are skipped and reported in the `errors` list.
   - Rate limiting via slowapi protects GCP API credits.
 """
-from __future__ import annotations
+
 
 import uuid
 from datetime import datetime, timezone

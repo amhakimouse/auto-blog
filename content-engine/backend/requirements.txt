@@ -29,8 +29,10 @@ lxml==5.2.*                       # fast HTML parser backend for bs4 / trafilatu
 
 # ── Security ─────────────────────────────────────────────────────────────────────
 bleach==6.1.*                     # HTML sanitizer (XSS prevention)
+tinycss2==1.3.*                  # CSS parser for bleach
 python-jose[cryptography]==3.3.*  # JWT tokens for auth (future)
-passlib[bcrypt]==1.7.*            # password hashing (future)
+passlib[bcrypt]==1.7.4
+bcrypt==4.0.1
 cryptography==42.*                # Fernet AES encryption for WP passwords (Integration model)
 
 # ── Rate Limiting ─────────────────────────────────────────────────────────────
