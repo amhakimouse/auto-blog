@@ -162,6 +162,7 @@ class _KeywordToArticleTask(BaseJobTask):
       6. Imagen: image generation (stub — future work)
       7. bleach sanitise → upsert Article in DB
     """
+    name = "app.worker.tasks.run_keyword_to_article"
 
     def execute(self, job_id: str, db: Session, job: Job) -> dict:
         # Inline import: keeps worker startup fast; avoids loading Vertex AI SDK
@@ -173,161 +174,25 @@ class _KeywordToArticleTask(BaseJobTask):
 run_keyword_to_article = celery_app.register_task(
     _KeywordToArticleTask()
 )
-# Give the registered task a predictable name for routing and monitoring.
-run_keyword_to_article.name = "app.worker.tasks.run_keyword_to_article"
 
 
 
 
 # ── Workflow 2: Link → Article ────────────────────────────────────────────────
 
-@celery_app.task(
-    bind=True,
-    name="app.worker.tasks.process_link_workflow",
-    queue="default",
-    # Reliability: acknowledge only after execution completes, so message is
-    # requeued if the worker process is killed mid-task.
-    acks_late=True,
-    reject_on_worker_lost=True,
+class _ReferenceToArticleTask(BaseJobTask):
+    """
+    Workflow 2 concrete task: Reference URL → Article.
+    """
+    name = "app.worker.tasks.run_reference_to_article"
+
+    def execute(self, job_id: str, db: Session, job: Job) -> dict:
+        from app.pipelines.reference_pipeline import ReferencePipeline
+        return ReferencePipeline(job_id=job_id, db=db, job=job).run()
+
+run_reference_to_article = celery_app.register_task(
+    _ReferenceToArticleTask()
 )
-def process_link_workflow(self: Task, job_id: str, url: str) -> dict:
-    """
-    Workflow 2 pipeline: Link → Article.
-
-    State machine:
-        PENDING → SCRAPING → WRITING → COMPLETED
-                                     ↘ FAILED (on any exception)
-
-    The async scraper (extract_article_content) is bridged to this synchronous
-    Celery task via asyncio.run(), which is safe because Celery workers run in
-    a plain thread with no running event loop.
-
-    Args:
-        job_id: UUID string of the Job row.
-        url:    Source article URL (already SSRF-validated at API layer).
-
-    Returns:
-        dict with "status" and "job_id" keys (consumed by Celery result backend).
-    """
-    logger = log.bind(task="process_link_workflow", job_id=job_id, url=url)
-    logger.info("workflow2.start")
-
-    # Inline imports keep worker startup fast and prevent circular dependencies.
-    from app.scrapers.article_scraper import extract_article_content
-    from app.ai.gemini_writer import rewrite_article_for_seo
-
-    with _SyncSession() as db:
-        # ── Guard: ensure the Job exists ─────────────────────────────────────
-        job = _get_job(db, job_id)
-        if job is None:
-            logger.error("workflow2.job_not_found")
-            return {"status": "error", "detail": f"Job {job_id!r} not found in DB."}
-
-        try:
-            # ── Stage 1: SCRAPING ─────────────────────────────────────────────
-            logger.info("workflow2.stage.scraping")
-            _set_status(
-                db, job,
-                status="scraping",   # custom granular status visible to the UI
-                progress_pct=10,
-            )
-
-            # Bridge async → sync: asyncio.run() creates a fresh event loop.
-            markdown_content: str = asyncio.run(extract_article_content(url))
-
-            logger.info(
-                "workflow2.scraping.done",
-                markdown_chars=len(markdown_content),
-            )
-
-            # ── Stage 2: WRITING ──────────────────────────────────────────────
-            logger.info("workflow2.stage.writing")
-            _set_status(
-                db, job,
-                status="writing",
-                progress_pct=40,
-            )
-
-            ai_result: dict = rewrite_article_for_seo(markdown_content)
-            # ai_result keys: title, html_content, word_count, slug
-
-            logger.info(
-                "workflow2.writing.done",
-                title=ai_result.get("title"),
-                word_count=ai_result.get("word_count"),
-            )
-
-            # ── Stage 3: Persist Article ──────────────────────────────────────
-            logger.info("workflow2.stage.persisting")
-            _set_status(db, job, status="writing", progress_pct=80)
-
-            _upsert_article(db=db, job=job, url=url, ai_result=ai_result)
-
-            # ── Stage 4: COMPLETED ────────────────────────────────────────────
-            _set_completed(
-                db, job,
-                meta_update={
-                    "source_url": url,
-                    "article_title": ai_result.get("title"),
-                    "word_count": ai_result.get("word_count"),
-                },
-            )
-            logger.info("workflow2.completed")
-            return {"status": "completed", "job_id": job_id}
-
-        except Exception as exc:
-            # ── FAILED: log to error_message column and mark job failed ───────
-            error_str = f"{type(exc).__name__}: {exc}"
-            logger.exception("workflow2.failed", error=error_str)
-            _set_failed(db, job, error=error_str)
-
-            # Retry with exponential back-off (30 → 60 → 120 seconds).
-            # On MaxRetriesExceeded the job stays FAILED; the worker does NOT crash.
-            try:
-                raise self.retry(
-                    exc=exc,
-                    countdown=2 ** self.request.retries * 30,
-                    max_retries=3,
-                )
-            except self.MaxRetriesExceededError:
-                logger.error("workflow2.max_retries_exceeded")
-                return {"status": "failed", "job_id": job_id}
-
-
-# ── Article upsert helper ─────────────────────────────────────────────────────
-
-def _upsert_article(db: Session, job: Job, url: str, ai_result: dict) -> Article:
-    """
-    Insert a new Article row or update the existing one for this job.
-
-    Using a get-or-create pattern so re-queued tasks don't violate the
-    unique constraint on articles.job_id.
-    """
-    article: Article | None = (
-        db.query(Article).filter(Article.job_id == job.id).first()
-    )
-
-    if article is None:
-        article = Article(
-            job_id=job.id,
-            user_id=job.user_id,
-            integration_id=job.integration_id,
-        )
-        db.add(article)
-
-    article.title = ai_result["title"]
-    article.slug = ai_result.get("slug")
-    article.html_content = ai_result["html_content"]
-    article.word_count = ai_result.get("word_count", 0)
-    article.source_urls = [url]
-    article.article_status = ArticleStatus.DRAFT_READY
-    article.updated_at = datetime.now(timezone.utc)
-
-    db.commit()
-    db.refresh(article)
-    log.info("workflow2.article_saved", article_id=str(article.id))
-    return article
-
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Background maintenance tasks

@@ -11,6 +11,7 @@ Changes:
     substitutes IMAGE_PLACEHOLDER_{id} with real base64 <img> or URL tags.
   - analyze_content_gaps: receives pre-summarised outlines (not raw HTML bodies).
 """
+
 from __future__ import annotations
 
 import json
@@ -19,26 +20,39 @@ import unicodedata
 
 import bleach
 import structlog
-import vertexai
-from vertexai.generative_models import (
-    GenerationConfig,
-    GenerativeModel,
-    HarmBlockThreshold,
-    HarmCategory,
-    Part,
-)
 
 from app.config import settings
 
 log = structlog.get_logger(__name__)
 
-# ── Vertex AI initialisation (done once at import time) ───────────────────────
-vertexai.init(
-    project=settings.gcp_project_id,
-    location=settings.gcp_location,
-)
+# ── Initialize based on configuration ──────────────────────────────────────────
+if settings.gemini_use_rest_api:
+    # Use direct REST API client
+    from app.ai.gemini_rest_client import (
+        GeminiApiError,
+        GeminiEmptyResponseError,
+        GeminiResponseParseError,
+        generate_content_rest,
+        generate_content_rest_json,
+    )
+
+    USE_REST_API = True
+else:
+    # Use Vertex AI SDK
+    import vertexai
+    from vertexai.generative_models import (
+        GenerationConfig,
+        GenerativeModel,
+        HarmBlockThreshold,
+        HarmCategory,
+        Part,
+    )
+
+    vertexai.init(project=settings.gcp_project_id)
+    USE_REST_API = False
 
 # ── Custom exceptions ──────────────────────────────────────────────────────────
+
 
 class GeminiWriterError(Exception):
     """Base exception for AI writing failures."""
@@ -54,14 +68,36 @@ class GeminiEmptyResponseError(GeminiWriterError):
 
 # ── HTML sanitisation allow-list (bleach) ─────────────────────────────────────
 _ALLOWED_TAGS: list[str] = [
-    "h1", "h2", "h3", "h4", "h5", "h6",
-    "p", "br", "hr",
-    "ul", "ol", "li",
-    "strong", "em", "b", "i", "u",
-    "a", "blockquote", "pre", "code",
-    "table", "thead", "tbody", "tr", "th", "td",
-    "figure", "figcaption",
-    "img",   # allowed for IMAGE_PLACEHOLDER substitution
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "p",
+    "br",
+    "hr",
+    "ul",
+    "ol",
+    "li",
+    "strong",
+    "em",
+    "b",
+    "i",
+    "u",
+    "a",
+    "blockquote",
+    "pre",
+    "code",
+    "table",
+    "thead",
+    "tbody",
+    "tr",
+    "th",
+    "td",
+    "figure",
+    "figcaption",
+    "img",  # allowed for IMAGE_PLACEHOLDER substitution
 ]
 _ALLOWED_ATTRIBUTES: dict[str, list[str]] = {
     "a": ["href", "title", "rel", "target"],
@@ -72,13 +108,16 @@ _ALLOWED_ATTRIBUTES: dict[str, list[str]] = {
     "img": ["src", "alt", "title", "width", "height", "loading", "class"],
 }
 
-# ── Safety settings ───────────────────────────────────────────────────────────
-_SAFETY_SETTINGS = {
-    HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-    HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-}
+# ── Safety settings (SDK-only) ────────────────────────────────────────────────
+if not USE_REST_API:
+    _SAFETY_SETTINGS = {
+        HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+        HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+        HarmCategory.HARM_CATEGORY_HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+        HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+    }
+else:
+    _SAFETY_SETTINGS = {}
 
 # ── System prompt (Workflow 2 rewrite) ────────────────────────────────────────
 _SYSTEM_PROMPT = """\
@@ -114,6 +153,7 @@ CRITICAL RULES:
 
 # ── Core function (Workflow 2) ────────────────────────────────────────────────
 
+
 def rewrite_article_for_seo(markdown_content: str) -> dict:
     """
     Rewrite *markdown_content* as an SEO-optimised HTML article using Gemini.
@@ -124,17 +164,6 @@ def rewrite_article_for_seo(markdown_content: str) -> dict:
     logger = log.bind(model=settings.vertex_ai_model, input_chars=len(markdown_content))
     logger.info("gemini_writer.rewrite.start")
 
-    model = GenerativeModel(
-        model_name=settings.vertex_ai_model,
-        system_instruction=_SYSTEM_PROMPT,
-    )
-    generation_config = GenerationConfig(
-        temperature=0.7,
-        top_p=0.95,
-        top_k=40,
-        max_output_tokens=8192,
-        response_mime_type="application/json",
-    )
     user_message = (
         "Please rewrite the following Markdown article as SEO-optimised HTML, "
         "following all the guidelines in your system prompt.\n\n"
@@ -144,18 +173,39 @@ def rewrite_article_for_seo(markdown_content: str) -> dict:
     )
 
     try:
-        response = model.generate_content(
-            contents=[Part.from_text(user_message)],
-            generation_config=generation_config,
-            safety_settings=_SAFETY_SETTINGS,
-        )
+        if USE_REST_API:
+            # Use direct REST API
+            parsed = generate_content_rest_json(
+                system_prompt=_SYSTEM_PROMPT,
+                user_message=user_message,
+                temperature=0.7,
+                logger=logger,
+            )
+        else:
+            # Use Vertex AI SDK
+            model = GenerativeModel(
+                model_name=settings.vertex_ai_model,
+                system_instruction=_SYSTEM_PROMPT,
+            )
+            generation_config = GenerationConfig(
+                temperature=0.7,
+                top_p=0.95,
+                top_k=40,
+                max_output_tokens=8192,
+                response_mime_type="application/json",
+            )
+            response = model.generate_content(
+                contents=[Part.from_text(user_message)],
+                generation_config=generation_config,
+                safety_settings=_SAFETY_SETTINGS,
+            )
+            raw_text = _extract_response_text(response, logger)
+            parsed = _parse_json_response(raw_text, logger)
     except Exception as exc:
-        msg = f"Vertex AI generate_content call failed: {type(exc).__name__}: {exc}"
+        msg = f"Gemini API call failed: {type(exc).__name__}: {exc}"
         logger.error("gemini_writer.api_error", error=str(exc))
         raise GeminiWriterError(msg) from exc
 
-    raw_text = _extract_response_text(response, logger)
-    parsed = _parse_json_response(raw_text, logger)
     _validate_keys(parsed)
 
     dirty_html: str = parsed["html_content"]
@@ -171,12 +221,18 @@ def rewrite_article_for_seo(markdown_content: str) -> dict:
     word_count: int = len(re.findall(r"\w+", clean_html))
     slug: str = _slugify(title)
 
-    result = {"title": title, "html_content": clean_html, "word_count": word_count, "slug": slug}
+    result = {
+        "title": title,
+        "html_content": clean_html,
+        "word_count": word_count,
+        "slug": slug,
+    }
     logger.info("gemini_writer.rewrite.success", title=title, word_count=word_count)
     return result
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────
+
 
 def _extract_response_text(response, logger: structlog.BoundLogger) -> str:
     """Pull the text string out of the Vertex AI response object."""
@@ -393,8 +449,8 @@ def _build_section_writer_prompt(
     if image_requested and image_placeholder_id:
         image_block = (
             "IMAGE PLACEMENT (mandatory for this section):\n"
-            f"Place exactly one <img src=\"IMAGE_PLACEHOLDER_{image_placeholder_id}\" "
-            f"alt=\"...\"> tag at the single most contextually appropriate position "
+            f'Place exactly one <img src="IMAGE_PLACEHOLDER_{image_placeholder_id}" '
+            f'alt="..."> tag at the single most contextually appropriate position '
             "within your HTML output. Choose the alt text to describe the ideal image "
             "for this section. Do NOT place the tag inside a <p> — use a standalone "
             "<figure><img ...><figcaption>...</figcaption></figure> block."
@@ -409,6 +465,7 @@ def _build_section_writer_prompt(
 
 
 # ── Public functions ───────────────────────────────────────────────────────────
+
 
 def analyze_content_gaps(scraped_articles: list[dict]) -> dict:
     """
@@ -451,8 +508,12 @@ def analyze_content_gaps(scraped_articles: list[dict]) -> dict:
     )
 
     required = (
-        "focus_keyword", "covered_topics", "content_gaps",
-        "recommended_angle", "suggested_title", "target_word_count",
+        "focus_keyword",
+        "covered_topics",
+        "content_gaps",
+        "recommended_angle",
+        "suggested_title",
+        "target_word_count",
     )
     for key in required:
         if key not in response_dict:
@@ -506,7 +567,9 @@ def generate_article_outline(gap_analysis: dict) -> list[dict]:
 
     meta = {
         "_meta": {
-            "title": response_dict.get("title", gap_analysis.get("suggested_title", "")),
+            "title": response_dict.get(
+                "title", gap_analysis.get("suggested_title", "")
+            ),
             "meta_description": response_dict.get("meta_description", ""),
         }
     }
@@ -578,15 +641,19 @@ def write_article_from_outline(
     # ── Write each section ────────────────────────────────────────────────────
     html_parts: list[str] = []
     # Track which IMAGE_PLACEHOLDER IDs we've committed so we can substitute later
-    image_placeholder_map: dict[str, int] = {}  # placeholder_id → generated_images index
+    image_placeholder_map: dict[
+        str, int
+    ] = {}  # placeholder_id → generated_images index
     placeholder_counter = 0
 
-    gen_config = GenerationConfig(
-        temperature=0.75,
-        top_p=0.95,
-        top_k=40,
-        max_output_tokens=2048,
-    )
+    gen_config = None
+    if not USE_REST_API:
+        gen_config = GenerationConfig(
+            temperature=0.75,
+            top_p=0.95,
+            top_k=40,
+            max_output_tokens=2048,
+        )
 
     for idx, section in enumerate(sections):
         wants_image = idx in section_image_indices
@@ -605,10 +672,14 @@ def write_article_from_outline(
             image_placeholder_id=placeholder_id,
         )
 
-        model = GenerativeModel(
-            model_name=settings.vertex_ai_model,
-            system_instruction=system_prompt,
-        )
+        if USE_REST_API:
+            # For REST API, we'll call generate_content_rest directly
+            pass
+        else:
+            model = GenerativeModel(
+                model_name=settings.vertex_ai_model,
+                system_instruction=system_prompt,
+            )
 
         section_logger = logger.bind(
             section_idx=idx,
@@ -624,12 +695,20 @@ def write_article_from_outline(
         )
 
         try:
-            response = model.generate_content(
-                contents=[Part.from_text(user_msg)],
-                generation_config=gen_config,
-                safety_settings=_SAFETY_SETTINGS,
-            )
-            section_html = _extract_response_text(response, section_logger)
+            if USE_REST_API:
+                section_html = generate_content_rest(
+                    system_prompt=system_prompt,
+                    user_message=user_msg,
+                    generation_config={"temperature": 0.75, "maxOutputTokens": 2048},
+                    logger=section_logger,
+                )
+            else:
+                response = model.generate_content(
+                    contents=[Part.from_text(user_msg)],
+                    generation_config=gen_config,
+                    safety_settings=_SAFETY_SETTINGS,
+                )
+                section_html = _extract_response_text(response, section_logger)
         except GeminiEmptyResponseError:
             section_logger.warning("gemini_writer.write_section.skipped_safety_block")
             continue
@@ -639,7 +718,9 @@ def write_article_from_outline(
             raise GeminiWriterError(msg) from exc
 
         # Strip accidental code fences
-        section_html = re.sub(r"^```(?:html)?\s*", "", section_html, flags=re.IGNORECASE)
+        section_html = re.sub(
+            r"^```(?:html)?\s*", "", section_html, flags=re.IGNORECASE
+        )
         section_html = re.sub(r"\s*```$", "", section_html).strip()
 
         html_parts.append(section_html)
@@ -654,7 +735,9 @@ def write_article_from_outline(
     raw_html = "\n\n".join(html_parts)
 
     # ── Substitute IMAGE_PLACEHOLDER_{id} with real <figure><img> tags ──────
-    raw_html = _substitute_image_placeholders(raw_html, image_placeholder_map, generated_images, logger)
+    raw_html = _substitute_image_placeholders(
+        raw_html, image_placeholder_map, generated_images, logger
+    )
 
     # ── Sanitise (bleach) ─────────────────────────────────────────────────────
     clean_html = bleach.clean(
@@ -688,6 +771,7 @@ def write_article_from_outline(
 
 # ── Image placeholder substitution ───────────────────────────────────────────
 
+
 def _substitute_image_placeholders(
     html: str,
     placeholder_map: dict[str, int],
@@ -702,6 +786,7 @@ def _substitute_image_placeholders(
     Unmatched placeholders (no generated image available) are replaced with an
     empty string so they don't appear as broken images.
     """
+
     def _replace(match: re.Match) -> str:
         placeholder_id = match.group(1)
         img_idx = placeholder_map.get(placeholder_id)
@@ -722,7 +807,7 @@ def _substitute_image_placeholders(
 
     # Match the src attribute value IMAGE_PLACEHOLDER_{id} inside img tags
     substituted = re.sub(
-        r'IMAGE_PLACEHOLDER_(\w+)',
+        r"IMAGE_PLACEHOLDER_(\w+)",
         _replace,
         html,
     )
@@ -730,6 +815,7 @@ def _substitute_image_placeholders(
 
 
 # ── Shared private helper ─────────────────────────────────────────────────────
+
 
 def _call_gemini_json(
     system_prompt: str,
@@ -753,34 +839,48 @@ def _call_gemini_json(
     """
     _MAX_SELF_CORRECTION_RETRIES = 2
 
-    model = GenerativeModel(
-        model_name=settings.vertex_ai_model,
-        system_instruction=system_prompt,
-    )
-    gen_config = GenerationConfig(
-        temperature=temperature,
-        top_p=0.95,
-        top_k=40,
-        max_output_tokens=4096,
-        response_mime_type="application/json",
-    )
-
-    # Build conversation contents. On retries, the previous bad response and
-    # the correction request are appended so the model sees its own mistake.
-    contents: list = [Part.from_text(user_message)]
-
-    try:
-        response = model.generate_content(
-            contents=contents,
-            generation_config=gen_config,
-            safety_settings=_SAFETY_SETTINGS,
+    # ── Call based on configured mode ──────────────────────────────────────────
+    if USE_REST_API:
+        try:
+            raw_text = generate_content_rest(
+                system_prompt=system_prompt,
+                user_message=user_message,
+                temperature=temperature,
+                logger=logger,
+            )
+        except Exception as exc:
+            msg = f"Gemini REST API call failed: {type(exc).__name__}: {exc}"
+            logger.error("gemini_writer.api_error", error=str(exc))
+            raise GeminiWriterError(msg) from exc
+    else:
+        # Use Vertex AI SDK
+        model = GenerativeModel(
+            model_name=settings.vertex_ai_model,
+            system_instruction=system_prompt,
         )
-    except Exception as exc:
-        msg = f"Vertex AI call failed: {type(exc).__name__}: {exc}"
-        logger.error("gemini_writer.api_error", error=str(exc))
-        raise GeminiWriterError(msg) from exc
+        gen_config = GenerationConfig(
+            temperature=temperature,
+            top_p=0.95,
+            top_k=40,
+            max_output_tokens=4096,
+            response_mime_type="application/json",
+        )
 
-    raw_text = _extract_response_text(response, logger)
+        # Build conversation contents. On retries, the previous bad response and
+        # the correction request are appended so the model sees its own mistake.
+        contents: list = [Part.from_text(user_message)]
+
+        try:
+            response = model.generate_content(
+                contents=contents,
+                generation_config=gen_config,
+                safety_settings=_SAFETY_SETTINGS,
+            )
+            raw_text = _extract_response_text(response, logger)
+        except Exception as exc:
+            msg = f"Vertex AI call failed: {type(exc).__name__}: {exc}"
+            logger.error("gemini_writer.api_error", error=str(exc))
+            raise GeminiWriterError(msg) from exc
 
     # ── Self-correction loop ───────────────────────────────────────────────────
     attempt = 0
@@ -815,16 +915,29 @@ def _call_gemini_json(
                 "Return ONLY the JSON object — no preamble, no explanation, "
                 "no markdown fences."
             )
-            correction_contents: list = [Part.from_text(correction_message)]
-            try:
-                correction_response = model.generate_content(
-                    contents=correction_contents,
-                    generation_config=gen_config,
-                    safety_settings=_SAFETY_SETTINGS,
-                )
-            except Exception as exc:
-                msg = f"Vertex AI self-correction call failed: {type(exc).__name__}: {exc}"
-                logger.error("gemini_writer.api_error", error=str(exc))
-                raise GeminiWriterError(msg) from exc
 
-            current_raw = _extract_response_text(correction_response, logger)
+            if USE_REST_API:
+                try:
+                    current_raw = generate_content_rest(
+                        system_prompt=system_prompt,
+                        user_message=correction_message,
+                        temperature=temperature,
+                        logger=logger,
+                    )
+                except Exception as exc:
+                    msg = f"Gemini REST API self-correction call failed: {type(exc).__name__}: {exc}"
+                    logger.error("gemini_writer.api_error", error=str(exc))
+                    raise GeminiWriterError(msg) from exc
+            else:
+                correction_contents: list = [Part.from_text(correction_message)]
+                try:
+                    correction_response = model.generate_content(
+                        contents=correction_contents,
+                        generation_config=gen_config,
+                        safety_settings=_SAFETY_SETTINGS,
+                    )
+                    current_raw = _extract_response_text(correction_response, logger)
+                except Exception as exc:
+                    msg = f"Vertex AI self-correction call failed: {type(exc).__name__}: {exc}"
+                    logger.error("gemini_writer.api_error", error=str(exc))
+                    raise GeminiWriterError(msg) from exc

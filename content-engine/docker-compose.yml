@@ -24,6 +24,7 @@ x-backend-common: &backend-common
       condition: service_healthy
   volumes:
     - ./backend:/app           # live-reload mount for development
+    - ../google_cloud_api.json:/secrets/gcp-service-account.json:ro   # GCP auth
   networks:
     - internal
 

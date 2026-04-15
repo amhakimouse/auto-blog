@@ -15,7 +15,6 @@ Design decisions:
   - Rate limiting via slowapi protects GCP API credits.
 """
 
-
 import uuid
 from datetime import datetime, timezone
 
@@ -42,12 +41,14 @@ log = get_logger(__name__)
 
 router = APIRouter()
 
+
 def user_id_or_ip(request: Request) -> str:
     auth = request.headers.get("Authorization")
     if auth and auth.startswith("Bearer "):
         token = auth.split(" ")[1]
         try:
             from app.security.auth import ALGORITHM
+
             payload = jwt.decode(token, settings.secret_key, algorithms=[ALGORITHM])
             user_id = payload.get("sub")
             if user_id:
@@ -56,10 +57,10 @@ def user_id_or_ip(request: Request) -> str:
             pass
     return get_remote_address(request)
 
+
 limiter = Limiter(key_func=user_id_or_ip)
 _RATE_LIMIT = "10/minute"
 
-# ── Task name mapping (shared by single and bulk creation) ────────────────────
 _TASK_MAP: dict[WorkflowType, str] = {
     WorkflowType.KEYWORD_TO_ARTICLE: "app.worker.tasks.run_keyword_to_article",
     WorkflowType.REFERENCE_TO_ARTICLE: "app.worker.tasks.run_reference_to_article",
@@ -67,6 +68,7 @@ _TASK_MAP: dict[WorkflowType, str] = {
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
 
 async def _get_owned_integration(
     integration_id: uuid.UUID,
@@ -94,13 +96,13 @@ def _build_job_meta(payload: JobCreate) -> dict:
         "content_image_count": payload.content_image_count,
         "include_featured_image": payload.include_featured_image,
         "related_articles": [
-            {"title": a.title, "url": a.url}
-            for a in payload.related_articles
+            {"title": a.title, "url": a.url} for a in payload.related_articles
         ],
     }
 
 
 # ── POST /jobs ────────────────────────────────────────────────────────────────
+
 
 @router.post(
     "",
@@ -137,7 +139,9 @@ async def create_job(
         try:
             reference_url_str = validate_url_for_ssrf(str(payload.reference_url))
         except SSRFViolationError as exc:
-            log.warning("jobs.ssrf_blocked", url=str(payload.reference_url), error=str(exc))
+            log.warning(
+                "jobs.ssrf_blocked", url=str(payload.reference_url), error=str(exc)
+            )
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"URL rejected for security reasons: {exc}",
@@ -157,9 +161,11 @@ async def create_job(
     await db.flush()
 
     # ── Dispatch Celery task ──────────────────────────────────────────────────
+    task_kwargs = {"job_id": str(job.id)}
+
     celery_result = celery_app.send_task(
         _TASK_MAP[payload.workflow_type],
-        kwargs={"job_id": str(job.id)},
+        kwargs=task_kwargs,
         queue="default",
     )
     job.celery_task_id = celery_result.id
@@ -179,6 +185,7 @@ async def create_job(
 # ── POST /jobs/bulk ───────────────────────────────────────────────────────────
 # NOTE: this route must be defined BEFORE /{job_id} so FastAPI doesn't treat
 # the literal "bulk" as a UUID segment.
+
 
 @router.post(
     "/bulk",
@@ -227,9 +234,7 @@ async def create_bulk_jobs(
             try:
                 reference_url_str = validate_url_for_ssrf(str(item.reference_url))
             except SSRFViolationError as exc:
-                errors.append(
-                    f"URL {item.reference_url!r} rejected: {exc}"
-                )
+                errors.append(f"URL {item.reference_url!r} rejected: {exc}")
                 failed_validation += 1
                 continue
 
@@ -251,9 +256,11 @@ async def create_bulk_jobs(
         await db.flush()  # get UUID before dispatching
 
         # ── Dispatch Celery task ──────────────────────────────────────────
+        task_kwargs = {"job_id": str(job.id)}
+
         celery_result = celery_app.send_task(
             _TASK_MAP[item.workflow_type],
-            kwargs={"job_id": str(job.id)},
+            kwargs=task_kwargs,
             queue="default",
         )
         job.celery_task_id = celery_result.id
@@ -281,6 +288,7 @@ async def create_bulk_jobs(
 
 from typing import Annotated
 
+
 @router.get(
     "",
     response_model=list[JobRead],
@@ -289,7 +297,9 @@ from typing import Annotated
 async def list_jobs(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_active_user),
-    limit: Annotated[int, Query(ge=1, le=100, description="Max records to return")] = 20,
+    limit: Annotated[
+        int, Query(ge=1, le=100, description="Max records to return")
+    ] = 20,
     offset: Annotated[int, Query(ge=0, description="Pagination offset")] = 0,
 ) -> list[Job]:
     """
@@ -312,6 +322,7 @@ async def list_jobs(
 
 # ── GET /jobs/{job_id} ──────────────────────────────────────────────────────────────
 
+
 @router.get(
     "/{job_id}",
     response_model=JobRead,
@@ -327,11 +338,14 @@ async def get_job(
     )
     job = result.scalar_one_or_none()
     if job is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Job not found"
+        )
     return job
 
 
 # ── DELETE /jobs/{job_id} ─────────────────────────────────────────────────────
+
 
 @router.delete(
     "/{job_id}",
@@ -348,7 +362,9 @@ async def cancel_job(
     )
     job = result.scalar_one_or_none()
     if job is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Job not found"
+        )
 
     if job.status not in (JobStatus.PENDING.value, JobStatus.PROCESSING.value):
         raise HTTPException(

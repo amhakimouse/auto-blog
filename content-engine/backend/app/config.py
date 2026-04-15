@@ -4,6 +4,7 @@ app/config.py — Centralised settings loaded from environment variables.
 Uses pydantic-settings so every setting is type-validated at startup.
 Never import os.environ directly elsewhere; always use `from app.config import settings`.
 """
+
 from functools import lru_cache
 from typing import Literal
 
@@ -16,7 +17,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
-        extra="ignore",          # silently drop unknown env vars
+        extra="ignore",  # silently drop unknown env vars
     )
 
     # ── App ──────────────────────────────────────────────────────────────────
@@ -40,15 +41,11 @@ class Settings(BaseSettings):
 
     # ── Google Cloud / Vertex AI ──────────────────────────────────────────────
     gcp_project_id: str = ""
-    gcp_location: str = "us-central1"
+    gcp_region: str = "us-central1"  # e.g., us-central1, europe-west1
     google_application_credentials: str = "/secrets/gcp-service-account.json"
-    vertex_ai_model: str = "gemini-1.5-pro-preview-0514"
+    vertex_ai_model: str = "gemini-2.5-flash"  # Uses direct REST API
     imagen_model: str = "imagegeneration@006"
-
-    # ── WordPress ─────────────────────────────────────────────────────────────
-    wp_site_url: str = ""
-    wp_username: str = ""
-    wp_app_password: str = ""
+    gemini_use_rest_api: bool = True  # Use direct HTTP REST API instead of SDK
 
     # ── Rate Limiting ─────────────────────────────────────────────────────────
     rate_limit_requests: int = 10
@@ -57,6 +54,8 @@ class Settings(BaseSettings):
     # ── Scraping / Security ───────────────────────────────────────────────────
     scrape_timeout_seconds: int = 20
     max_scrape_urls: int = 5
+    # Proxy URL for scraping (e.g. http://user:pass@proxy_host:port) to bypass DDG rate limits
+    scrape_proxy_url: str | None = None
     # Comma-separated CIDR blocks to block for SSRF protection
     ssrf_blocked_ranges: str = (
         "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.0/8,::1/128"
@@ -67,8 +66,7 @@ class Settings(BaseSettings):
     def must_be_async_driver(cls, v: str) -> str:
         if not v.startswith("postgresql+asyncpg"):
             raise ValueError(
-                "DATABASE_URL must use the asyncpg driver: "
-                "postgresql+asyncpg://..."
+                "DATABASE_URL must use the asyncpg driver: postgresql+asyncpg://..."
             )
         return v
 

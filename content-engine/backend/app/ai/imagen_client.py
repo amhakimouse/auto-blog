@@ -35,7 +35,6 @@ log = get_logger(__name__)
 # ── Vertex AI init (done once at import time, idempotent) ─────────────────────
 vertexai.init(
     project=settings.gcp_project_id,
-    location=settings.gcp_location,
 )
 
 # ── Custom exceptions ──────────────────────────────────────────────────────────

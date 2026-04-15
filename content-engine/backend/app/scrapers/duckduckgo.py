@@ -62,7 +62,7 @@ class DuckDuckGoParseError(DuckDuckGoError):
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
-_DDG_ENDPOINT: Final[str] = "https://html.duckduckgo.com/html/"
+_DDG_ENDPOINT: Final[str] = "https://lite.duckduckgo.com/lite/"
 
 # Mimic a real browser to avoid bot-detection heuristics.
 _HEADERS: Final[dict[str, str]] = {
@@ -75,8 +75,8 @@ _HEADERS: Final[dict[str, str]] = {
     "Accept-Language": "en-US,en;q=0.9",
     "Accept-Encoding": "gzip, deflate, br",
     "Content-Type": "application/x-www-form-urlencoded",
-    "Origin": "https://html.duckduckgo.com",
-    "Referer": "https://html.duckduckgo.com/",
+    "Origin": "https://lite.duckduckgo.com",
+    "Referer": "https://lite.duckduckgo.com/",
     "DNT": "1",
 }
 
@@ -138,6 +138,7 @@ class DuckDuckGoScraper:
             pool=5.0,
         )
         self._polite_delay_s: float = polite_delay_ms / 1000.0
+        self._proxy = settings.scrape_proxy_url
 
     # ── Public method ─────────────────────────────────────────────────────────
 
@@ -189,6 +190,7 @@ class DuckDuckGoScraper:
                 timeout=self._timeout,
                 follow_redirects=True,
                 max_redirects=5,
+                proxy=self._proxy if self._proxy else None,
             ) as client:
                 response = client.post(_DDG_ENDPOINT, data=payload)
 
