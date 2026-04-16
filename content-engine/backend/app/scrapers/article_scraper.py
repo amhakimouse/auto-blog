@@ -12,11 +12,11 @@ Security note:
   SSRF validation is performed at the API layer (app/security.py) before the
   URL ever reaches this function. This module trusts the URL is safe to fetch.
 """
-from __future__ import annotations
-
+import random
 import structlog
 import httpx
 import trafilatura
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from app.config import settings
 
@@ -38,19 +38,22 @@ class ArticleExtractionError(ArticleScraperError):
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
-# A realistic desktop User-Agent so sites don't serve bot-mitigation pages.
-_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/124.0.0.0 Safari/537.36"
-)
+# Realistic desktop User-Agents for rotation to bypass basic bot protection.
+_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+]
 
-_DEFAULT_HEADERS: dict[str, str] = {
-    "User-Agent": _USER_AGENT,
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-}
+def _get_headers() -> dict[str, str]:
+    return {
+        "User-Agent": random.choice(_USER_AGENTS),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+    }
 
 
 # ── Core function ─────────────────────────────────────────────────────────────
@@ -58,25 +61,12 @@ _DEFAULT_HEADERS: dict[str, str] = {
 async def extract_article_content(url: str) -> str:
     """
     Asynchronously fetch *url* and return the main article body as Markdown.
-
-    Args:
-        url: A fully-qualified HTTP/HTTPS URL that has already passed SSRF
-             validation at the API layer.
-
-    Returns:
-        A non-empty Markdown string containing the extracted article text.
-
-    Raises:
-        ArticleFetchError: The URL could not be fetched (bad status, timeout,
-                           network error, or SSL failure).
-        ArticleExtractionError: trafilatura could not identify meaningful
-                                content in the fetched document.
     """
     logger = log.bind(url=url)
     logger.info("scraper.fetch.start")
 
-    # ── Step 1: Fetch raw HTML ────────────────────────────────────────────────
-    raw_html: str = await _fetch_html(url, logger)
+    # ── Step 1: Fetch raw HTML with retries and proxies ───────────────────────
+    raw_html: str = await _fetch_html_with_retries(url, logger)
 
     # ── Step 2: Extract article body as Markdown ──────────────────────────────
     markdown: str = _extract_markdown(raw_html, url, logger)
@@ -88,18 +78,23 @@ async def extract_article_content(url: str) -> str:
 async def _fetch_raw_html(url: str) -> str:
     """
     Convenience wrapper: fetch a URL and return raw HTML.
-
-    Used by keyword_pipeline._scrape_outline() which needs raw HTML for
-    BeautifulSoup parsing rather than trafilatura-extracted Markdown.
-
-    Raises:
-        ArticleFetchError on any fetch failure.
+    Used by keyword_pipeline._scrape_outline().
     """
     logger = log.bind(url=url, purpose="outline_extraction")
-    return await _fetch_html(url, logger)
+    return await _fetch_html_with_retries(url, logger)
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception_type(ArticleFetchError),
+    reraise=True,
+)
+async def _fetch_html_with_retries(url: str, logger: structlog.BoundLogger) -> str:
+    """Wrapper around _fetch_html to provide tenacity-based retries."""
+    return await _fetch_html(url, logger)
 
 async def _fetch_html(url: str, logger: structlog.BoundLogger) -> str:
     """Return raw HTML as a string, raising ArticleFetchError on any failure."""
@@ -110,16 +105,28 @@ async def _fetch_html(url: str, logger: structlog.BoundLogger) -> str:
         pool=5.0,
     )
 
+    # Configure proxy if available
+    proxies = None
+    if settings.scrape_proxy_url:
+        proxies = {"all://": settings.scrape_proxy_url}
+
     try:
         async with httpx.AsyncClient(
-            headers=_DEFAULT_HEADERS,
+            headers=_get_headers(),
             timeout=timeout,
             follow_redirects=True,
             max_redirects=5,
-            verify=True,           # enforce valid TLS certificates
+            verify=True,
+            proxy=settings.scrape_proxy_url if settings.scrape_proxy_url else None,
         ) as client:
             response = await client.get(url)
-            response.raise_for_status()  # raises HTTPStatusError on 4xx/5xx
+            
+            # If blocked (403/429), raise so tenacity retries with a new User-Agent
+            if response.status_code in (403, 429):
+                logger.warning("scraper.fetch.blocked", status_code=response.status_code)
+                raise ArticleFetchError(f"Site blocked access with status {response.status_code}")
+                
+            response.raise_for_status()
 
         logger.info(
             "scraper.fetch.success",
@@ -129,44 +136,27 @@ async def _fetch_html(url: str, logger: structlog.BoundLogger) -> str:
         return response.text
 
     except httpx.HTTPStatusError as exc:
-        msg = (
-            f"HTTP {exc.response.status_code} received for URL: {url}. "
-            f"Reason: {exc.response.reason_phrase}"
-        )
+        msg = f"HTTP {exc.response.status_code} received for URL: {url}"
         logger.warning("scraper.fetch.http_error", status_code=exc.response.status_code)
         raise ArticleFetchError(msg) from exc
 
     except httpx.TimeoutException as exc:
-        msg = (
-            f"Request timed out after {settings.scrape_timeout_seconds}s "
-            f"while fetching: {url}"
-        )
+        msg = f"Request timed out after {settings.scrape_timeout_seconds}s for {url}"
         logger.warning("scraper.fetch.timeout")
         raise ArticleFetchError(msg) from exc
 
-    except httpx.TooManyRedirects as exc:
-        msg = f"Too many redirects (>5) when fetching: {url}"
-        logger.warning("scraper.fetch.too_many_redirects")
-        raise ArticleFetchError(msg) from exc
-
-    except httpx.RequestError as exc:
-        # Covers: ConnectError, RemoteProtocolError, SSLError, etc.
-        msg = f"Network error when fetching {url}: {type(exc).__name__}: {exc}"
-        logger.warning("scraper.fetch.network_error", exc_type=type(exc).__name__)
+    except Exception as exc:
+        msg = f"Fetch failed for {url}: {type(exc).__name__}: {exc}"
+        logger.warning("scraper.fetch.error", exc_type=type(exc).__name__)
         raise ArticleFetchError(msg) from exc
 
 
 def _extract_markdown(raw_html: str, url: str, logger: structlog.BoundLogger) -> str:
     """
     Run trafilatura extraction and return a non-empty Markdown string.
-
-    trafilatura is configured for maximum content quality:
-      - output_format="markdown" → preserves headings and lists
-      - include_comments=False → strips comment sections
-      - include_tables=True → keeps structured data
-      - no_fallback=False → tries alternative extraction heuristics if primary fails
     """
     try:
+        # Attempt 1: Standard clean extraction
         extracted: str | None = trafilatura.extract(
             raw_html,
             url=url,
@@ -174,19 +164,30 @@ def _extract_markdown(raw_html: str, url: str, logger: structlog.BoundLogger) ->
             include_comments=False,
             include_tables=True,
             no_fallback=False,
-            favor_precision=False,   # favor recall; we want maximum article text
+            favor_precision=False,
         )
+        
+        # Attempt 2: Fallback with comments (sometimes contains hidden content)
+        if not extracted or len(extracted.strip()) < 200:
+            logger.info("scraper.extract.trying_fallback_with_comments")
+            extracted = trafilatura.extract(
+                raw_html,
+                url=url,
+                output_format="markdown",
+                include_comments=True,
+                include_tables=True,
+                no_fallback=False,
+            )
+
     except Exception as exc:
-        # trafilatura should not raise normally, but guard defensively.
         msg = f"trafilatura raised an unexpected error for {url}: {exc}"
         logger.error("scraper.extract.trafilatura_exception", error=str(exc))
         raise ArticleExtractionError(msg) from exc
 
     if not extracted or not extracted.strip():
         msg = (
-            f"trafilatura returned no usable content for URL: {url}. "
-            "The page may be behind a paywall, JavaScript-rendered, or "
-            "contain insufficient article text."
+            f"No usable content found for URL: {url}. "
+            "This site might be JavaScript-rendered or heavily protected."
         )
         logger.warning("scraper.extract.empty_result")
         raise ArticleExtractionError(msg)

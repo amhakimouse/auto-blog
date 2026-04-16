@@ -114,8 +114,8 @@ class IntegrationRead(BaseModel):
 
     model_config = {"from_attributes": True}
 
-    id: str
-    user_id: str
+    id: uuid.UUID
+    user_id: uuid.UUID
     site_name: str
     wp_url: str
     wp_username: str
@@ -134,8 +134,8 @@ class IntegrationRead(BaseModel):
     def from_orm_with_link_count(cls, integration: Integration) -> "IntegrationRead":
         """Build the response, computing cached_link_count from the JSONB field."""
         data = {
-            "id": str(integration.id),
-            "user_id": str(integration.user_id),
+            "id": integration.id,
+            "user_id": integration.user_id,
             "site_name": integration.site_name,
             "wp_url": integration.wp_url,
             "wp_username": integration.wp_username,
@@ -387,3 +387,30 @@ async def test_integration(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Connection failed: {str(e)}",
         )
+
+
+@router.post(
+    "/{integration_id}/sync",
+    summary="Trigger WordPress link sync",
+)
+async def sync_integration(
+    integration_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_active_user),
+) -> dict:
+    """
+    Trigger the Celery task to sync WordPress post links (slug -> URL map).
+    Returns 202 Accepted.
+    """
+    await _get_owned_integration(integration_id, user, db)
+
+    from app.worker.celery_app import celery_app
+
+    celery_app.send_task(
+        "app.worker.tasks.sync_wp_links",
+        kwargs={"integration_id": str(integration_id)},
+        queue="default",
+    )
+
+    log.info("integrations.sync_triggered", integration_id=str(integration_id))
+    return {"success": True, "message": "Sync task triggered"}

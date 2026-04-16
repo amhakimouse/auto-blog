@@ -155,16 +155,13 @@ class JobRead(BaseModel):
     input_url: str | None
     celery_task_id: str | None
     error_message: str | None
+    meta: dict | None = None
     created_at: datetime
     updated_at: datetime
     completed_at: datetime | None
 
-    @field_serializer("id")
-    def serialize_id(self, value: uuid.UUID) -> str:
-        return str(value)
-
-    @field_serializer("integration_id")
-    def serialize_integration_id(self, value: uuid.UUID | None) -> str | None:
+    @field_serializer("id", "integration_id")
+    def serialize_uuids(self, value: uuid.UUID | None) -> str | None:
         return str(value) if value else None
 
 

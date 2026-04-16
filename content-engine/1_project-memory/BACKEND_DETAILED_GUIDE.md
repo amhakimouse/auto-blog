@@ -91,7 +91,7 @@ class Settings(BaseSettings):
     
     # Google Cloud
     gcp_project_id: str = ""
-    vertex_ai_model: str = "gemini-1.5-pro-preview-0514"
+    vertex_ai_model: str = "gemini-2.5-flash"
 ```
 
 **Usage:** All other modules import settings from here:

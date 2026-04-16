@@ -19,12 +19,14 @@ import structlog
 from celery import Task
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.config import settings
 from app.models.article import Article, ArticleStatus
 from app.models.integration import Integration
 from app.models.job import Job, JobStatus
 from app.models.user import User
+from app.scrapers.article_scraper import ArticleExtractionError
 from app.worker.celery_app import celery_app
 
 log = structlog.get_logger(__name__)
@@ -60,7 +62,10 @@ def _set_status(
     job.status = status
     job.progress_pct = progress_pct
     if meta_update:
-        job.meta = {**job.meta, **meta_update}
+        if job.meta is None:
+            job.meta = {}
+        job.meta.update(meta_update)
+        flag_modified(job, "meta")
     db.commit()
 
 
@@ -73,7 +78,10 @@ def _set_completed(db: Session, job: Job, meta_update: dict | None = None) -> No
     job.progress_pct = 100
     job.completed_at = datetime.now(timezone.utc)
     if meta_update:
-        job.meta = {**job.meta, **meta_update}
+        if job.meta is None:
+            job.meta = {}
+        job.meta.update(meta_update)
+        flag_modified(job, "meta")
 
     # Atomically decrement user credits
     user = db.query(User).filter(User.id == job.user_id).first()
@@ -83,10 +91,17 @@ def _set_completed(db: Session, job: Job, meta_update: dict | None = None) -> No
     db.commit()
 
 
-def _set_failed(db: Session, job: Job, error: str) -> None:
+def _set_failed(db: Session, job: Job, error: str, failure_reason: str | None = None) -> None:
     job.status = JobStatus.FAILED.value
     job.error_message = error[:2000]   # cap length for DB column
     job.completed_at = datetime.now(timezone.utc)
+    
+    if failure_reason:
+        if job.meta is None:
+            job.meta = {}
+        job.meta["failure_reason"] = failure_reason
+        flag_modified(job, "meta")
+        
     db.commit()
 
 
@@ -100,7 +115,7 @@ class BaseJobTask(Task):
     abstract = True
 
     def run(self, job_id: str) -> dict:
-        log.info("task.started", task=self.name, job_id=job_id)
+        log.info("task.received", task=self.name, job_id=job_id)
         with _SyncSession() as db:
             job = _get_job(db, job_id)
             if job is None:
@@ -113,6 +128,21 @@ class BaseJobTask(Task):
                 _set_completed(db, job, meta_update=result_meta)
                 log.info("task.completed", task=self.name, job_id=job_id)
                 return {"status": "completed", "job_id": job_id}
+
+            except ArticleExtractionError as exc:
+                log.warning(
+                    "task.extraction_failed",
+                    task=self.name,
+                    job_id=job_id,
+                    error=str(exc),
+                )
+                # Store user-friendly failure reason in job.meta
+                failure_reason = str(exc)
+                if "trafilatura" in failure_reason.lower() or "no usable content" in failure_reason.lower():
+                    failure_reason = "This site blocks automated access or uses JavaScript-only rendering."
+                
+                _set_failed(db, job, error=str(exc), failure_reason=failure_reason)
+                return {"status": "failed", "job_id": job_id}
 
             except Exception as exc:
                 # ── Dead-letter strategy: log, mark failed, don't crash worker ──

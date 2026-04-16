@@ -26,10 +26,15 @@ from app.models.article import Article, ArticleStatus
 from app.models.job import Job, JobStatus
 from app.pipelines.base import BasePipeline
 from app.scrapers.article_scraper import extract_article_content
-from app.ai.gemini_writer import rewrite_article_for_seo
+from app.ai.gemini_writer import rewrite_article_for_seo, _substitute_image_placeholders
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 log = get_logger(__name__)
+
+# Maximum content images allowed for Workflow 2 (clamped)
+_MAX_CONTENT_IMAGES: int = 5
+_MAX_FEATURED_AND_CONTENT: int = 6
 
 # ── Bleach sanitisation config (mirrors gemini_writer) ────────────────────────
 _ALLOWED_TAGS: list[str] = [
@@ -40,6 +45,7 @@ _ALLOWED_TAGS: list[str] = [
     "a", "blockquote", "pre", "code",
     "table", "thead", "tbody", "tr", "th", "td",
     "figure", "figcaption",
+    "img",
 ]
 _ALLOWED_ATTRIBUTES: dict[str, list[str]] = {
     "a": ["href", "title", "rel", "target"],
@@ -47,6 +53,7 @@ _ALLOWED_ATTRIBUTES: dict[str, list[str]] = {
     "th": ["colspan", "rowspan", "scope"],
     "blockquote": ["cite"],
     "code": ["class"],
+    "img": ["src", "alt", "title", "width", "height", "loading", "class"],
 }
 
 
@@ -61,10 +68,24 @@ class ReferencePipeline(BasePipeline):
     def __init__(self, job_id: str, db: Session, job: Job) -> None:
         super().__init__(job_id, db, job)
         self.url: str = job.input_url or ""
+        
+        # ── Image configuration (from job.meta, sanitised & clamped) ─────────
+        meta: dict = job.meta or {}
+        raw_content_count = int(meta.get("content_image_count", 0))
+        self.content_image_count: int = max(0, min(raw_content_count, _MAX_CONTENT_IMAGES))
+        self.include_featured_image: bool = bool(meta.get("include_featured_image", True))
+        
+        # Clamp total to hard cap
+        total = self.content_image_count + int(self.include_featured_image)
+        if total > _MAX_FEATURED_AND_CONTENT:
+            self.content_image_count = _MAX_FEATURED_AND_CONTENT - int(self.include_featured_image)
+
         self._logger: structlog.BoundLogger = log.bind(
             job_id=job_id,
             pipeline="reference",
             url=self.url,
+            content_images=self.content_image_count,
+            featured_image=self.include_featured_image,
         )
 
     # ── Public entry-point ────────────────────────────────────────────────────
@@ -88,6 +109,14 @@ class ReferencePipeline(BasePipeline):
 
         # ── Stage 1 & 2: Fetch URL and extract Markdown ───────────────────────
         markdown_content: str = self._fetch()
+        
+        # Save extracted source content to job meta
+        if self.job.meta is None:
+            self.job.meta = {}
+        self.job.meta["extracted_source"] = markdown_content
+        flag_modified(self.job, "meta")
+        self.db.commit()
+
         self._logger.info(
             "reference_pipeline.fetch_extract.done",
             markdown_chars=len(markdown_content),
@@ -104,10 +133,20 @@ class ReferencePipeline(BasePipeline):
         )
         self._update_progress(60)
 
-        # ── Stage 4: Sanitise + persist ───────────────────────────────────────
-        self._set_job_status("writing", progress=70)
-        self._finalize(ai_payload)
-        self._update_progress(90)
+        # ── Stage 4: Generate images ──────────────────────────────────────────
+        self._set_job_status("writing", progress=65)
+        title = ai_payload.get("title", "Article")
+        featured_image, content_images = self._generate_images(article_title=title)
+        self._update_progress(80)
+
+        # ── Stage 5: Sanitise + persist ───────────────────────────────────────
+        self._set_job_status("writing", progress=85)
+        self._finalize(
+            parsed_ai_payload=ai_payload,
+            featured_image=featured_image,
+            content_images=content_images
+        )
+        self._update_progress(95)
 
         self._logger.info("reference_pipeline.run.complete")
         return {
@@ -159,7 +198,45 @@ class ReferencePipeline(BasePipeline):
         self._logger.info("reference_pipeline.rewrite.start")
         return rewrite_article_for_seo(markdown_content)
 
-    def _finalize(self, parsed_ai_payload: dict) -> None:
+    def _generate_images(self, article_title: str) -> tuple[dict | None, list[dict]]:
+        """
+        Generate images for the article using Imagen.
+        For ReferencePipeline, we focus on the featured image.
+        """
+        from app.ai.imagen_client import (
+            build_section_prompt,
+            generate_section_image,
+            ImagenSafetyError,
+            ImagenError,
+        )
+
+        featured_image: dict | None = None
+        content_images: list[dict] = []
+
+        # ── 1. Featured image (hero) ──────────────────────────────────────────
+        if self.include_featured_image:
+            hero_prompt = build_section_prompt(article_title, "Introduction")
+            self._logger.info("reference_pipeline.images.featured.start", prompt=hero_prompt)
+            try:
+                featured_image = generate_section_image(hero_prompt, aspect_ratio="16:9")
+                self._logger.info("reference_pipeline.images.featured.done")
+            except ImagenSafetyError as exc:
+                self._logger.warning(
+                    "reference_pipeline.images.featured.safety_blocked", error=str(exc)
+                )
+            except ImagenError as exc:
+                self._logger.warning(
+                    "reference_pipeline.images.featured.error", error=str(exc)
+                )
+
+        return featured_image, content_images
+
+    def _finalize(
+        self,
+        parsed_ai_payload: dict,
+        featured_image: dict | None = None,
+        content_images: list[dict] | None = None
+    ) -> None:
         """
         Sanitise the AI-generated HTML and persist the Article to the database.
 
@@ -172,11 +249,23 @@ class ReferencePipeline(BasePipeline):
         Args:
             parsed_ai_payload: Dict returned by ``_rewrite()``.
                                Must contain ``title`` and ``html_content``.
+            featured_image: Optional featured image dict.
+            content_images: Optional list of content image dicts.
         """
         self._logger.info("reference_pipeline.finalize.start")
 
-        # ── Defence-in-depth sanitisation (AI output is untrusted) ────────────
         raw_html: str = parsed_ai_payload.get("html_content", "")
+        
+        # ── Placeholder substitution (if images exist) ────────────────────────
+        if content_images:
+            placeholder_map: dict[str, int] = {
+                str(i): i for i in range(len(content_images))
+            }
+            raw_html = _substitute_image_placeholders(
+                raw_html, placeholder_map, content_images, self._logger
+            )
+
+        # ── Defence-in-depth sanitisation (AI output is untrusted) ────────────
         clean_html: str = bleach.clean(
             raw_html,
             tags=_ALLOWED_TAGS,
@@ -190,6 +279,14 @@ class ReferencePipeline(BasePipeline):
         word_count: int = parsed_ai_payload.get("word_count") or len(
             re.findall(r"\w+", clean_html)
         )
+
+        # Compile all image dicts for storage
+        all_images: list[dict] = []
+        if featured_image:
+            all_images.append({**featured_image, "role": "featured"})
+        if content_images:
+            for img in content_images:
+                all_images.append({**img, "role": "content"})
 
         # ── Upsert Article (safe for Celery retries) ──────────────────────────
         article: Article | None = (
@@ -213,6 +310,7 @@ class ReferencePipeline(BasePipeline):
         article.slug = slug
         article.html_content = clean_html
         article.word_count = word_count
+        article.images = all_images
         article.source_urls = [self.url]
         article.article_status = ArticleStatus.DRAFT_READY   # awaiting human review
         article.updated_at = datetime.now(timezone.utc)
@@ -225,6 +323,7 @@ class ReferencePipeline(BasePipeline):
             article_id=str(article.id),
             article_status=article.article_status,
             word_count=word_count,
+            images_total=len(all_images),
         )
         # ── Auto-publish removed ────────────────────────────────────────────
         # Publishing is exclusively handled by POST /api/v1/articles/{id}/publish.

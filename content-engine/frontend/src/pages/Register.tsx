@@ -34,7 +34,11 @@ export function RegisterPage() {
     }
 
     try {
-      const response = await auth.register(email, password, name);
+      const response = await auth.register({
+        email,
+        password,
+        full_name: name
+      });
       login(response.access_token, response.user);
       addToast('success', 'Account created successfully!');
       navigate('/dashboard');

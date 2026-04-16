@@ -57,22 +57,21 @@ export function JobDetailPage() {
         <div className="flex items-start justify-between mb-6">
           <div>
             <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-1">
-              {job.workflow_type === 'keyword' ? 'Keyword Based' : 'Reference Based'} Article Generation
+              {job.workflow_type === 'keyword_to_article' ? 'Keyword Based' : 'Reference Based'} Article Generation
             </h2>
-            <p className="text-gray-600 dark:text-gray-400">{job.input}</p>
+            <p className="text-gray-600 dark:text-gray-400">{job.input_keyword || job.input_url}</p>
           </div>
           <Badge variant={job.status}>{job.status}</Badge>
-        </div>
+          </div>
 
-        {/* Progress */}
-        <div className="mb-6">
+          {/* Progress */}
+          <div className="mb-6">
           <div className="flex items-center justify-between mb-2">
             <span className="text-sm font-medium text-gray-700 dark:text-gray-300">Progress</span>
-            <span className="text-sm text-gray-500">{job.progress}%</span>
+            <span className="text-sm text-gray-500">{job.progress_pct}%</span>
           </div>
-          <Progress value={job.progress} showLabel />
-        </div>
-
+          <Progress value={job.progress_pct} showLabel />
+          </div>
         {/* Timeline */}
         <div className="relative">
           <div className="flex items-center justify-between">
@@ -139,7 +138,7 @@ export function JobDetailPage() {
       {/* Details */}
       <Card>
         <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Details</h3>
-        <dl className="grid grid-cols-2 gap-4">
+        <dl className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
             <dt className="text-sm text-gray-500 dark:text-gray-400">Created</dt>
             <dd className="text-gray-900 dark:text-white">{format(new Date(job.created_at), 'MMM d, yyyy HH:mm')}</dd>
@@ -150,17 +149,28 @@ export function JobDetailPage() {
           </div>
           <div>
             <dt className="text-sm text-gray-500 dark:text-gray-400">Workflow</dt>
-            <dd className="text-gray-900 dark:text-white capitalize">{job.workflow_type}</dd>
+            <dd className="text-gray-900 dark:text-white capitalize">{job.workflow_type.replace(/_/g, ' ')}</dd>
           </div>
         </dl>
+
+        {job.meta?.extracted_source && (
+          <div className="mt-6 pt-6 border-t border-gray-200 dark:border-dark-border">
+            <h4 className="text-sm font-medium text-gray-900 dark:text-white mb-2">Extracted Source Content</h4>
+            <div className="bg-gray-50 dark:bg-dark-card p-4 rounded-lg max-h-60 overflow-y-auto">
+              <pre className="text-xs text-gray-600 dark:text-gray-400 whitespace-pre-wrap font-sans">
+                {job.meta.extracted_source}
+              </pre>
+            </div>
+          </div>
+        )}
       </Card>
 
       {/* View Article */}
-      {job.status === 'completed' && job.article && (
+      {job.status === 'completed' && (
         <div className="flex justify-end">
-          <Link to={`/articles/${job.article.id}`}>
+          <Link to={`/articles`}>
             <Button rightIcon={<ExternalLink className="w-4 h-4" />}>
-              View Generated Article
+              View in Articles List
             </Button>
           </Link>
         </div>

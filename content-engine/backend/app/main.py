@@ -87,6 +87,10 @@ def create_app() -> FastAPI:
     # ── API Routes ────────────────────────────────────────────────────────────
     app.include_router(api_router, prefix=settings.api_v1_prefix)
 
+    # Log registered routes for debugging
+    for route in app.routes:
+        log.info("app.route_registered", path=route.path, name=route.name)
+
     # ── Health / Readiness Probes ─────────────────────────────────────────────
     @app.get("/health", tags=["ops"], include_in_schema=False)
     async def health() -> JSONResponse:

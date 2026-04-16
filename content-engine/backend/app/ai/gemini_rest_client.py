@@ -97,18 +97,18 @@ class _VertexAIAuth:
 
 
 def _build_api_url(model_id: str) -> str:
-    """Build the Vertex AI REST API URL for the given model."""
-    region = settings.gcp_region
+    """Build the Vertex AI REST API URL for the given model using the global endpoint."""
     project_id = settings.gcp_project_id
 
     # Remove 'models/' prefix if present
     if model_id.startswith("models/"):
         model_id = model_id[7:]
 
+    # Using 'global' location as requested ("no region") and 'generateContent' (unary)
     return (
         f"https://aiplatform.googleapis.com/v1/"
-        f"projects/{project_id}/locations/{region}/"
-        f"publishers/google/models/{model_id}:streamGenerateContent"
+        f"projects/{project_id}/locations/global/"
+        f"publishers/google/models/{model_id}:generateContent"
     )
 
 
@@ -118,66 +118,65 @@ def _build_request_payload(
     generation_config: dict | None = None,
 ) -> dict:
     """Build the JSON payload for the Gemini API request."""
-    contents: list[dict] = []
-
-    # System instruction as first content if provided
-    if system_instruction:
-        contents.append(
+    payload: dict[str, Any] = {
+        "contents": [
             {
                 "role": "user",
-                "parts": [{"text": system_instruction}],
+                "parts": [{"text": user_message}],
             }
-        )
-        contents.append(
-            {
-                "role": "model",
-                "parts": [{"text": "Understood. I will follow these instructions."}],
-            }
-        )
+        ]
+    }
 
-    # User message
-    contents.append(
-        {
-            "role": "user",
-            "parts": [{"text": user_message}],
+    # Add system_instruction as a top-level field (Vertex AI standard)
+    if system_instruction:
+        payload["system_instruction"] = {
+            "parts": [{"text": system_instruction}]
         }
-    )
 
     config = _GENERATION_CONFIG.copy()
     if generation_config:
+        # If response_schema is provided, move it to the correct place
+        if "response_schema" in generation_config:
+            config["responseSchema"] = generation_config.pop("response_schema")
         config.update(generation_config)
 
-    return {
-        "contents": contents,
-        "generationConfig": config,
-        "safetySettings": _SAFETY_SETTINGS,
-    }
+    payload["generationConfig"] = config
+    payload["safetySettings"] = _SAFETY_SETTINGS
+
+    return payload
 
 
-def _parse_streaming_response(response_text: str) -> str:
+def _parse_response(response_text: str) -> str:
     """
-    Parse the streaming JSON array response from Gemini.
-    Returns the concatenated text from all chunks.
+    Parse the JSON response from Gemini (handles both unary and streaming array).
+    Returns the concatenated text from all candidates/chunks.
     """
     full_text = []
 
     try:
-        # Vertex AI streamGenerateContent returns a JSON array of objects
-        chunks = json.loads(response_text)
+        data = json.loads(response_text)
     except json.JSONDecodeError as exc:
         log.error("gemini_rest.json_decode_error", error=str(exc))
-        return ""
+        # If it's not valid JSON, it might be raw text or a partial stream
+        return response_text
 
-    if isinstance(chunks, dict):
-        chunks = [chunks]
-
-    if not isinstance(chunks, list):
-        return ""
+    # Handle streaming array [obj, obj, ...]
+    if isinstance(data, list):
+        chunks = data
+    else:
+        # Handle unary object {candidates: [...]}
+        chunks = [data]
 
     for chunk in chunks:
         # Extract text from candidates
         candidates = chunk.get("candidates", [])
         for candidate in candidates:
+            # Check for error in candidate
+            if "error" in candidate:
+                err = candidate["error"]
+                log.error("gemini_rest.candidate_error", code=err.get("code"), message=err.get("message"))
+                continue
+
             content = candidate.get("content", {})
             parts = content.get("parts", [])
             for part in parts:
@@ -201,20 +200,6 @@ def generate_content_rest(
 ) -> str:
     """
     Call Gemini via REST API and return the generated text.
-
-    Args:
-        system_prompt: Optional system instructions
-        user_message: The user message/prompt
-        model: Model ID (defaults to settings.vertex_ai_model)
-        generation_config: Optional generation parameters override
-        logger: Optional logger instance
-
-    Returns:
-        Generated text string
-
-    Raises:
-        GeminiApiError: If API returns an error
-        GeminiEmptyResponseError: If response is empty or blocked
     """
     logger = logger or log
     model_id = model or settings.vertex_ai_model
@@ -233,20 +218,18 @@ def generate_content_rest(
 
     # Make request
     try:
-        with httpx.Client(timeout=120.0) as client:
+        with httpx.Client(timeout=180.0) as client:
             response = client.post(url, json=payload, headers=headers)
-            response.raise_for_status()
+            
+            if response.status_code != 200:
+                logger.error("gemini_rest.api_error", status=response.status_code, body=response.text[:1000])
+                response.raise_for_status()
 
-            # Parse JSON array streaming response
-            full_text = _parse_streaming_response(response.text)
+            # Parse response (unary or streaming)
+            full_text = _parse_response(response.text)
 
     except httpx.HTTPStatusError as exc:
         error_text = exc.response.text if hasattr(exc, "response") else str(exc)
-        logger.error(
-            "gemini_rest.api_error",
-            status=exc.response.status_code,
-            error=error_text[:500],
-        )
         raise GeminiApiError(
             f"API error {exc.response.status_code}: {error_text[:500]}"
         ) from exc
@@ -267,23 +250,11 @@ def generate_content_rest_json(
     user_message: str,
     model: str | None = None,
     temperature: float = 0.6,
+    response_schema: dict | None = None,
     logger: Any | None = None,
 ) -> dict:
     """
     Call Gemini via REST API and parse the response as JSON.
-
-    Args:
-        system_prompt: System instructions
-        user_message: The user message/prompt
-        model: Model ID (defaults to settings.vertex_ai_model)
-        temperature: Generation temperature
-        logger: Optional logger instance
-
-    Returns:
-        Parsed JSON dict
-
-    Raises:
-        GeminiResponseParseError: If response cannot be parsed as JSON
     """
     logger = logger or log
 
@@ -291,6 +262,8 @@ def generate_content_rest_json(
         "temperature": temperature,
         "responseMimeType": "application/json",
     }
+    if response_schema:
+        gen_config["response_schema"] = response_schema
 
     try:
         response_text = generate_content_rest(
@@ -308,56 +281,98 @@ def generate_content_rest_json(
     cleaned = re.sub(r"\s*```$", "", cleaned).strip()
 
     try:
-        parsed = json.loads(cleaned)
+        return json.loads(cleaned)
     except json.JSONDecodeError as exc:
-        # LLMs often hallucinate unescaped newlines and sometimes abruptly truncate outputs.
-        # We manually walk the string to escape newlines safely and close hanging structures.
-        in_string = False
-        escape = False
-        fixed_chars = []
+        logger.warning("gemini_rest.json_parse_error.attempting_repair", error=str(exc))
         
-        for char in cleaned:
-            if escape:
-                fixed_chars.append(char)
-                escape = False
-                continue
-            if char == '\\':
-                escape = True
-                fixed_chars.append(char)
-                continue
-            if char == '"':
-                in_string = not in_string
-                fixed_chars.append(char)
-                continue
-            if in_string and char == '\n':
-                fixed_chars.extend(['\\', 'n'])
-                continue
-            if in_string and char == '\r':
-                continue # drop carriage returns in strings
-                
-            fixed_chars.append(char)
-            
-        if in_string:
-            fixed_chars.append('"')
-            
-        repaired = "".join(fixed_chars)
+        # ── Advanced JSON Repair ─────────────────────────────────────────────
+        # 1. Basic cleaning
+        repaired = cleaned.strip()
         
-        parsed = None
-        for suffix in ("", "}", "]}", "]", '"}'):
-            try:
-                parsed = json.loads(repaired + suffix)
-                break
-            except json.JSONDecodeError:
-                continue
-                
-        if parsed is None:
-            msg = f"Failed to parse JSON response: {exc}. Raw: {response_text[:500]!r}"
-            logger.error("gemini_rest.json_parse_error", error=str(exc))
-            raise GeminiResponseParseError(msg) from exc
+        # 2. Handle truncation (if it doesn't end with })
+        if not repaired.endswith('}'):
+            # Find the last valid key-value completion if possible, or just close it
+            last_quote = repaired.rfind('"')
+            if last_quote != -1:
+                # If we're inside a string, close it
+                # Check if the quote is escaped
+                if last_quote > 0 and repaired[last_quote-1] != '\\':
+                    # Might be the end of a string or start of one. 
+                    # Heuristic: if there's a colon before it, it's likely a value.
+                    pass
             
-        logger.warning("gemini_rest.json_repaired_successfully")
+            # Simple approach: append closing structure based on counts
+            open_braces = repaired.count('{') - repaired.count('}')
+            if open_braces > 0:
+                # If it ends mid-string
+                if repaired.count('"') % 2 != 0:
+                    repaired += '"'
+                repaired += '}' * open_braces
 
-    return parsed
+        # 3. Robust quote escaping for large HTML blobs
+        # This regex looks for "key": "value" pairs and escapes internal quotes in value
+        def _escape_internal_quotes(json_str: str) -> str:
+            # Find all top-level keys
+            parts = []
+            last_pos = 0
+            # Matches "key": "
+            for m in re.finditer(r'"(\w+)":\s*"', json_str):
+                # Append everything from last_pos to start of this match
+                parts.append(json_str[last_pos:m.start()])
+                
+                # We found a key and the start of a value
+                key_start = m.start()
+                val_start = m.end()
+                
+                # Now we need to find the end of this value. 
+                # The end of a value is a quote followed by , or }
+                # But there might be escaped quotes \" inside.
+                # We search for the next " that is NOT preceded by \ AND is followed by \s*[,}]
+                # OR the end of the string.
+                end_m = re.search(r'(?<!\\)"\s*(?=[,}])', json_str[val_start:])
+                if end_m:
+                    val_end_relative = end_m.start()
+                    val_end = val_start + val_end_relative
+                    content = json_str[val_start:val_end]
+                    # Escape any unescaped quotes in content
+                    fixed_content = re.sub(r'(?<!\\)"', '\\"', content)
+                    # Replace unescaped newlines with \n
+                    fixed_content = fixed_content.replace('\n', '\\n').replace('\r', '')
+                    
+                    parts.append(f'"{m.group(1)}": "{fixed_content}"')
+                    last_pos = val_end + 1 # +1 to skip the closing quote
+                else:
+                    # No end found, take the rest of the string
+                    content = json_str[val_start:]
+                    fixed_content = re.sub(r'(?<!\\)"', '\\"', content)
+                    fixed_content = fixed_content.replace('\n', '\\n').replace('\r', '')
+                    parts.append(f'"{m.group(1)}": "{fixed_content}"')
+                    last_pos = len(json_str)
+                    break
+            
+            if last_pos < len(json_str):
+                parts.append(json_str[last_pos:])
+            
+            return "".join(parts)
+
+        try:
+            repaired = _escape_internal_quotes(repaired)
+            parsed = json.loads(repaired)
+            logger.info("gemini_rest.json_repaired_successfully")
+            return parsed
+        except Exception as repair_exc:
+            logger.warning("gemini_rest.json_repair_failed", error=str(repair_exc))
+
+        # 4. Last ditch: Truncate at last valid }
+        last_brace = cleaned.rfind('}')
+        if last_brace != -1:
+            try:
+                return json.loads(cleaned[:last_brace+1])
+            except json.JSONDecodeError:
+                pass
+
+        msg = f"Failed to parse JSON response: {exc}. Raw: {response_text[:500]!r}"
+        raise GeminiResponseParseError(msg) from exc
 
 
 # ═════════════════════════════════════════════════════════════════════════════

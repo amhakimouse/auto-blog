@@ -151,6 +151,71 @@ CRITICAL RULES:
 """
 
 
+# ── JSON Schemas for Controlled Generation (OpenAPI 3.0 subset) ────────────────
+
+_REWRITE_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "title": {"type": "STRING"},
+        "html_content": {"type": "STRING"},
+    },
+    "required": ["title", "html_content"],
+}
+
+_GAP_ANALYSIS_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "focus_keyword": {"type": "STRING"},
+        "covered_topics": {"type": "ARRAY", "items": {"type": "STRING"}},
+        "content_gaps": {"type": "ARRAY", "items": {"type": "STRING"}},
+        "recommended_angle": {"type": "STRING"},
+        "suggested_title": {"type": "STRING"},
+        "target_word_count": {"type": "INTEGER"},
+        "semantic_keywords": {"type": "ARRAY", "items": {"type": "STRING"}},
+    },
+    "required": [
+        "focus_keyword",
+        "covered_topics",
+        "content_gaps",
+        "recommended_angle",
+        "suggested_title",
+        "target_word_count",
+    ],
+}
+
+_OUTLINE_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "title": {"type": "STRING"},
+        "meta_description": {"type": "STRING"},
+        "sections": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "heading": {"type": "STRING"},
+                    "type": {"type": "STRING", "enum": ["introduction", "body", "faq", "conclusion"]},
+                    "key_points": {"type": "ARRAY", "items": {"type": "STRING"}},
+                    "subsections": {
+                        "type": "ARRAY",
+                        "items": {
+                            "type": "OBJECT",
+                            "properties": {
+                                "heading": {"type": "STRING"},
+                                "key_points": {"type": "ARRAY", "items": {"type": "STRING"}},
+                            },
+                            "required": ["heading", "key_points"],
+                        },
+                    },
+                },
+                "required": ["heading", "type", "key_points"],
+            },
+        },
+    },
+    "required": ["title", "meta_description", "sections"],
+}
+
+
 # ── Core function (Workflow 2) ────────────────────────────────────────────────
 
 
@@ -179,6 +244,7 @@ def rewrite_article_for_seo(markdown_content: str) -> dict:
                 system_prompt=_SYSTEM_PROMPT,
                 user_message=user_message,
                 temperature=0.7,
+                response_schema=_REWRITE_SCHEMA,
                 logger=logger,
             )
         else:
@@ -193,6 +259,7 @@ def rewrite_article_for_seo(markdown_content: str) -> dict:
                 top_k=40,
                 max_output_tokens=8192,
                 response_mime_type="application/json",
+                response_schema=_REWRITE_SCHEMA if hasattr(GenerationConfig, "response_schema") else None,
             )
             response = model.generate_content(
                 contents=[Part.from_text(user_message)],
@@ -335,16 +402,7 @@ Your task is to perform a thorough CONTENT GAP ANALYSIS:
 3. Identify the keywords and phrases used most frequently.
 4. Recommend the optimal content strategy to outrank these competitors.
 
-YOU MUST REPLY WITH A SINGLE VALID JSON OBJECT:
-{
-  "focus_keyword": "<primary keyword to target>",
-  "covered_topics": ["<topic 1>", "<topic 2>", ...],
-  "content_gaps": ["<missing topic 1>", "<missing topic 2>", ...],
-  "recommended_angle": "<1–2 sentence description of the best strategy>",
-  "suggested_title": "<compelling article title that targets the focus keyword>",
-  "target_word_count": <integer, recommended article length>,
-  "semantic_keywords": ["<related keyword 1>", "<related keyword 2>", ...]
-}
+YOU MUST REPLY WITH A SINGLE VALID JSON OBJECT.
 
 RULES:
 - Reply with JSON only — no preamble, no explanation.
@@ -361,22 +419,7 @@ Your task is to produce a STRUCTURED ARTICLE OUTLINE with sections that:
 3. Are ordered for maximum reader engagement and SEO crawlability.
 4. Include a compelling H1 title and descriptive H2 / H3 section names.
 
-YOU MUST REPLY WITH A SINGLE VALID JSON OBJECT:
-{
-  "title": "<H1 article title — plain text, no HTML>",
-  "meta_description": "<150-160 char SEO meta description>",
-  "sections": [
-    {
-      "heading": "<H2 section heading>",
-      "type": "introduction|body|faq|conclusion",
-      "key_points": ["<point to cover>", ...],
-      "subsections": [
-        {"heading": "<H3 subheading>", "key_points": ["<point>", ...]}
-      ]
-    },
-    ...
-  ]
-}
+YOU MUST REPLY WITH A SINGLE VALID JSON OBJECT.
 
 RULES:
 - Reply with JSON only.
@@ -505,6 +548,7 @@ def analyze_content_gaps(scraped_articles: list[dict]) -> dict:
         user_message=user_message,
         logger=logger,
         temperature=0.4,
+        response_schema=_GAP_ANALYSIS_SCHEMA,
     )
 
     required = (
@@ -556,6 +600,7 @@ def generate_article_outline(gap_analysis: dict) -> list[dict]:
         user_message=user_message,
         logger=logger,
         temperature=0.5,
+        response_schema=_OUTLINE_SCHEMA,
     )
 
     sections: list[dict] = response_dict.get("sections", [])
@@ -699,7 +744,7 @@ def write_article_from_outline(
                 section_html = generate_content_rest(
                     system_prompt=system_prompt,
                     user_message=user_msg,
-                    generation_config={"temperature": 0.75, "maxOutputTokens": 2048},
+                    generation_config={"temperature": 0.75, "maxOutputTokens": 4096},
                     logger=section_logger,
                 )
             else:
@@ -822,6 +867,7 @@ def _call_gemini_json(
     user_message: str,
     logger: structlog.BoundLogger,
     temperature: float = 0.6,
+    response_schema: dict | None = None,
     *,
     _retry_count: int = 0,
 ) -> dict:
@@ -846,6 +892,7 @@ def _call_gemini_json(
                 system_prompt=system_prompt,
                 user_message=user_message,
                 temperature=temperature,
+                generation_config={"response_schema": response_schema} if response_schema else None,
                 logger=logger,
             )
         except Exception as exc:
@@ -864,6 +911,7 @@ def _call_gemini_json(
             top_k=40,
             max_output_tokens=4096,
             response_mime_type="application/json",
+            response_schema=response_schema if hasattr(GenerationConfig, "response_schema") else None,
         )
 
         # Build conversation contents. On retries, the previous bad response and
@@ -922,6 +970,7 @@ def _call_gemini_json(
                         system_prompt=system_prompt,
                         user_message=correction_message,
                         temperature=temperature,
+                        generation_config={"response_schema": response_schema} if response_schema else None,
                         logger=logger,
                     )
                 except Exception as exc:

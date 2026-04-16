@@ -15,9 +15,9 @@ class ArticleRead(BaseModel):
 
     model_config = {"from_attributes": True}
 
-    id: str
-    job_id: str
-    integration_id: str | None
+    id: uuid.UUID
+    job_id: uuid.UUID
+    integration_id: uuid.UUID | None
     article_status: str
     title: str
     slug: str | None

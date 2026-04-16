@@ -46,5 +46,5 @@ Update this file when you discover or fix issues.
 
 - `DATABASE_URL` **must** start with `postgresql+asyncpg://` — validated at startup.
 - GCP credentials file path defaults to `/secrets/gcp-service-account.json` (Docker mount).
-- `VERTEX_AI_MODEL` defaults to `gemini-1.5-pro-preview-0514` — update if model is deprecated.
+- `VERTEX_AI_MODEL` defaults to `gemini-2.5-flash` — update if model is deprecated.
 - `SECRET_KEY` must be ≥ 32 characters — pydantic validation will fail otherwise.

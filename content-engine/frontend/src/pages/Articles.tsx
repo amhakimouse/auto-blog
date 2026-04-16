@@ -32,9 +32,11 @@ export function ArticlesPage() {
     },
   });
 
-  const filteredArticles = articlesData?.items?.filter((article: Article) =>
+  const articleList = Array.isArray(articlesData) ? articlesData : (articlesData?.items || []);
+
+  const filteredArticles = articleList.filter((article: Article) =>
     article.title.toLowerCase().includes(searchQuery.toLowerCase())
-  ) || [];
+  );
 
   const handlePublishClick = (article: Article) => {
     setSelectedArticle(article);

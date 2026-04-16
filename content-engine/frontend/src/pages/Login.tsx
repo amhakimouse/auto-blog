@@ -20,7 +20,7 @@ export function LoginPage() {
     setError('');
 
     try {
-      const response = await auth.login(email, password);
+      const response = await auth.login({ email, password });
       login(response.access_token, response.user);
       addToast('success', 'Welcome back!');
       navigate('/dashboard');
