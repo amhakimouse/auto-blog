@@ -69,6 +69,8 @@ services:
   # ── FastAPI Backend ─────────────────────────────────────────────────────────
   backend:
     <<: *backend-common
+    environment:
+      - FLARESOLVERR_URL=http://flaresolverr:8191
     command: >
       uvicorn app.main:app
       --host 0.0.0.0
@@ -86,6 +88,8 @@ services:
   # ── Celery Worker ───────────────────────────────────────────────────────────
   worker:
     <<: *backend-common
+    environment:
+      - FLARESOLVERR_URL=http://flaresolverr:8191
     command: >
       celery -A app.worker.celery_app worker
       --loglevel=info
@@ -96,6 +100,18 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+
+  # ── FlareSolverr (Cloudflare Bypass) ────────────────────────────────────────
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    restart: unless-stopped
+    environment:
+      - LOG_LEVEL=info
+      - TZ=UTC
+    networks:
+      - internal
+
 
   # ── Celery Beat (scheduler — optional, for future cron jobs) ────────────────
   beat:
@@ -123,6 +139,19 @@ services:
     networks:
       - internal
 
+  # ── Watchtower (Auto-updates) ───────────────────────────────────────────────
+  watchtower:
+    image: containrrr/watchtower
+    container_name: watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - WATCHTOWER_POLL_INTERVAL=3600  # Check for updates every hour
+      - WATCHTOWER_CLEANUP=true        # Remove old images after updating
+    networks:
+      - internal
+
   # ── React Frontend ──────────────────────────────────────────────────────────
   frontend:
     build:
@@ -135,6 +164,7 @@ services:
       - "5173:5173"
     environment:
       - VITE_API_BASE_URL=http://backend:8000
+      - CHOKIDAR_USEPOLLING=true
     networks:
       - internal
     depends_on:

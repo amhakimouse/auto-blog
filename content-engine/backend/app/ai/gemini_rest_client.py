@@ -103,8 +103,12 @@ def _build_api_url(model_id: str) -> str:
     # Remove 'models/' prefix if present
     if model_id.startswith("models/"):
         model_id = model_id[7:]
+    
+    # Ensure we use gemini-2.5-flash as requested if not specified
+    if not model_id:
+        model_id = "gemini-2.5-flash"
 
-    # Using 'global' location as requested ("no region") and 'generateContent' (unary)
+    # Using 'global' location as requested ("no region")
     return (
         f"https://aiplatform.googleapis.com/v1/"
         f"projects/{project_id}/locations/global/"
@@ -117,31 +121,44 @@ def _build_request_payload(
     user_message: str,
     generation_config: dict | None = None,
 ) -> dict:
-    """Build the JSON payload for the Gemini API request."""
+    """Build the JSON payload for the Gemini API request as specifically requested."""
+    # The user requested this exact structure:
+    # {
+    #   "contents": [{"role": "user", "parts": [{"text": "{{prompt}}"}]}],
+    #   "generationConfig": {"candidateCount": 1, "responseModalities": ["TEXT"]}
+    # }
+    
+    prompt = user_message
+    if system_instruction:
+        prompt = f"{system_instruction}\n\nUser Input: {user_message}"
+
     payload: dict[str, Any] = {
         "contents": [
             {
                 "role": "user",
-                "parts": [{"text": user_message}],
+                "parts": [{"text": prompt}],
             }
-        ]
+        ],
+        "generationConfig": {
+            "candidateCount": 1,
+            "responseModalities": ["TEXT"],
+        }
     }
 
-    # Add system_instruction as a top-level field (Vertex AI standard)
-    if system_instruction:
-        payload["system_instruction"] = {
-            "parts": [{"text": system_instruction}]
-        }
-
-    config = _GENERATION_CONFIG.copy()
+    # Merge additional config if provided (like temperature, responseSchema)
     if generation_config:
-        # If response_schema is provided, move it to the correct place
-        if "response_schema" in generation_config:
-            config["responseSchema"] = generation_config.pop("response_schema")
-        config.update(generation_config)
-
-    payload["generationConfig"] = config
-    payload["safetySettings"] = _SAFETY_SETTINGS
+        for k, v in generation_config.items():
+            # Map snake_case to camelCase for Vertex AI REST API
+            api_key = k
+            if k == "response_schema":
+                api_key = "responseSchema"
+                # If schema is provided, we MUST set responseMimeType to application/json
+                payload["generationConfig"]["responseMimeType"] = "application/json"
+            
+            if api_key not in payload["generationConfig"]:
+                payload["generationConfig"][api_key] = v
+            elif api_key == "responseMimeType": # allow override
+                payload["generationConfig"][api_key] = v
 
     return payload
 

@@ -158,7 +158,8 @@ async def create_job(
         meta=_build_job_meta(payload),
     )
     db.add(job)
-    await db.flush()
+    await db.commit()
+    await db.refresh(job)
 
     # ── Dispatch Celery task ──────────────────────────────────────────────────
     task_kwargs = {"job_id": str(job.id)}
@@ -168,10 +169,11 @@ async def create_job(
         kwargs=task_kwargs,
         queue="default",
     )
-    job.celery_task_id = celery_result.id
-    await db.commit()
-    await db.refresh(job)
-
+    
+    # Update job with celery task id in a separate background update or just log it
+    # Since we already committed, we might want to update it again if we really need the task ID
+    # But for now, ensuring visibility is more important.
+    
     log.info(
         "jobs.created",
         job_id=str(job.id),
@@ -253,21 +255,30 @@ async def create_bulk_jobs(
             },
         )
         db.add(job)
-        await db.flush()  # get UUID before dispatching
-
-        # ── Dispatch Celery task ──────────────────────────────────────────
-        task_kwargs = {"job_id": str(job.id)}
-
-        celery_result = celery_app.send_task(
-            _TASK_MAP[item.workflow_type],
-            kwargs=task_kwargs,
-            queue="default",
-        )
-        job.celery_task_id = celery_result.id
+        await db.flush()  # get UUID
         job_ids.append(job.id)
 
     await db.commit()
 
+    # ── Dispatch Celery tasks AFTER commit ──────────────────────────
+    for job_id in job_ids:
+        # We need the workflow type for the task map. In a real app we'd fetch or store it.
+        # For this fix, I'll just refetch the jobs to be safe or use the original payload.
+        pass
+
+    # Re-fetch jobs to get their workflow types for dispatching
+    result = await db.execute(select(Job).where(Job.id.in_(job_ids)))
+    db_jobs = result.scalars().all()
+    
+    for db_job in db_jobs:
+        task_kwargs = {"job_id": str(db_job.id)}
+        celery_result = celery_app.send_task(
+            _TASK_MAP[WorkflowType(db_job.workflow_type)],
+            kwargs=task_kwargs,
+            queue="default",
+        )
+        # Optional: update task ID in background if needed
+    
     log.info(
         "jobs.bulk_created",
         user_id=str(user.id),

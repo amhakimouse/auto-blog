@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     celery_broker_url: str = "redis://redis:6379/0"
     celery_result_backend: str = "redis://redis:6379/1"
 
+    # ── FlareSolverr ──────────────────────────────────────────────────────────
+    flaresolverr_url: str | None = "http://flaresolverr:8191"
+
     # ── Google Cloud / Vertex AI ──────────────────────────────────────────────
     gcp_project_id: str = ""
     gcp_region: str = "us-central1"  # e.g., us-central1, europe-west1
@@ -60,6 +63,15 @@ class Settings(BaseSettings):
     ssrf_blocked_ranges: str = (
         "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.0/8,::1/128"
     )
+
+    @field_validator("scrape_proxy_url", mode="before")
+    @classmethod
+    def strip_proxy_comments(cls, v: str | None) -> str | None:
+        if isinstance(v, str):
+            # Split by # and take the first part, then strip whitespace
+            clean = v.split("#")[0].strip()
+            return clean if clean else None
+        return v
 
     @field_validator("database_url")
     @classmethod

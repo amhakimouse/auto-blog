@@ -16,6 +16,9 @@ export default defineConfig({
   server: {
     host: '0.0.0.0',
     port: 5173,
+    watch: {
+      usePolling: true,
+    },
     proxy: {
       '/api/v1': {
         target: process.env.VITE_API_BASE_URL || 'http://backend:8000',
