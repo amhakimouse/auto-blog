@@ -1,20 +1,12 @@
 """
 app/pipelines/reference_pipeline.py — Workflow 2: Competitor Link → Article.
 
-Concrete implementation of BasePipeline for the "reference URL" workflow.
-
-Step sequence:
-  1. _fetch()    — async httpx GET via extract_article_content (bridged to sync)
-  2. _extract()  — returns the Markdown from the same async call (bundled)
-  3. _rewrite()  — Gemini SEO rewriter → returns structured AI payload dict
-  4. _finalize() — bleach sanitise → upsert Article row → mark job completed
-
-The async scraper is bridged with asyncio.run() because Celery workers
-execute in a plain thread with no running event loop.
+Refactored to use the Unified Analysis Pattern and robust asset processing.
 """
 from __future__ import annotations
 
 import asyncio
+import base64
 import re
 from datetime import datetime, timezone
 
@@ -25,335 +17,131 @@ from app.logger import get_logger
 from app.models.article import Article, ArticleStatus
 from app.models.job import Job, JobStatus
 from app.pipelines.base import BasePipeline
-from app.scrapers.article_scraper import extract_article_content
-from app.ai.gemini_writer import rewrite_article_for_seo, _substitute_image_placeholders
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
 log = get_logger(__name__)
 
-# Maximum content images allowed for Workflow 2 (clamped)
-_MAX_CONTENT_IMAGES: int = 5
-_MAX_FEATURED_AND_CONTENT: int = 6
-
-# ── Bleach sanitisation config (mirrors gemini_writer) ────────────────────────
-_ALLOWED_TAGS: list[str] = [
-    "h1", "h2", "h3", "h4", "h5", "h6",
-    "p", "br", "hr",
-    "ul", "ol", "li",
-    "strong", "em", "b", "i", "u",
-    "a", "blockquote", "pre", "code",
-    "table", "thead", "tbody", "tr", "th", "td",
-    "figure", "figcaption",
-    "img",
-]
-_ALLOWED_ATTRIBUTES: dict[str, list[str]] = {
-    "a": ["href", "title", "rel", "target"],
-    "td": ["colspan", "rowspan"],
-    "th": ["colspan", "rowspan", "scope"],
-    "blockquote": ["cite"],
-    "code": ["class"],
-    "img": ["src", "alt", "title", "width", "height", "loading", "class"],
-}
-
-
 class ReferencePipeline(BasePipeline):
-    """
-    Workflow 2: Fetch a competitor article URL and rewrite it as SEO-optimised HTML.
-
-    Attributes:
-        url: Source URL read from ``job.input_url`` at construction time.
-    """
-
     def __init__(self, job_id: str, db: Session, job: Job) -> None:
         super().__init__(job_id, db, job)
         self.url: str = job.input_url or ""
-        
-        # ── Image configuration (from job.meta, sanitised & clamped) ─────────
-        meta: dict = job.meta or {}
-        raw_content_count = int(meta.get("content_image_count", 0))
-        self.content_image_count: int = max(0, min(raw_content_count, _MAX_CONTENT_IMAGES))
-        self.include_featured_image: bool = bool(meta.get("include_featured_image", True))
-        
-        # Clamp total to hard cap
-        total = self.content_image_count + int(self.include_featured_image)
-        if total > _MAX_FEATURED_AND_CONTENT:
-            self.content_image_count = _MAX_FEATURED_AND_CONTENT - int(self.include_featured_image)
-
-        self._logger: structlog.BoundLogger = log.bind(
-            job_id=job_id,
-            pipeline="reference",
-            url=self.url,
-            content_images=self.content_image_count,
-            featured_image=self.include_featured_image,
-        )
-
-    # ── Public entry-point ────────────────────────────────────────────────────
+        meta = job.meta or {}
+        self.content_image_count = max(0, min(int(meta.get("content_image_count", 0)), 5))
+        self._logger = log.bind(job_id=job_id, pipeline="reference", url=self.url)
 
     def run(self) -> dict:
-        """
-        Execute the full Workflow 2 pipeline.
+        if self.job.status == JobStatus.AWAITING_PREVIEW.value:
+            return self._resume_generation()
 
-        Progress checkpoints (visible to the polling UI):
-          10 % → start
-          30 % → fetch + extract complete
-          60 % → AI rewrite complete
-          90 % → article persisted
-         100 % → job completed (set by task shell via _set_completed)
-
-        Returns:
-            A dict merged into ``job.meta`` by the task shell.
-        """
-        self._logger.info("reference_pipeline.run.start")
         self._set_job_status("scraping", progress=10)
-
-        # ── Stage 1 & 2: Fetch URL and extract Markdown ───────────────────────
-        markdown_content: str = self._fetch()
+        from app.scrapers.article_scraper import extract_article_content
+        markdown = asyncio.run(extract_article_content(self.url))
         
-        # Save extracted source content to job meta
-        if self.job.meta is None:
-            self.job.meta = {}
-        self.job.meta["extracted_source"] = markdown_content
+        if self.job.meta is None: self.job.meta = {}
+        self.job.meta["extracted_source"] = markdown
+        self.db.commit()
+
+        self._set_job_status("analyzing", progress=35)
+        from app.ai.gemini_writer import run_unified_analysis
+        analysis = run_unified_analysis(markdown, logger=self._logger)
+        
+        self.job.meta["unified_analysis"] = analysis
         flag_modified(self.job, "meta")
         self.db.commit()
 
-        self._logger.info(
-            "reference_pipeline.fetch_extract.done",
-            markdown_chars=len(markdown_content),
-        )
-        self._update_progress(30)
+        self._set_job_status(JobStatus.AWAITING_PREVIEW.value, progress=60)
+        return {"status": "awaiting_preview", "analysis": analysis}
 
-        # ── Stage 3: AI rewrite → structured payload ──────────────────────────
-        self._set_job_status("writing", progress=35)
-        ai_payload: dict = self._rewrite(markdown_content)
-        self._logger.info(
-            "reference_pipeline.rewrite.done",
-            title=ai_payload.get("title"),
-        )
+    def _resume_generation(self) -> dict:
+        analysis = self.job.meta.get("unified_analysis")
+        self._set_job_status(JobStatus.PROCESSING.value, progress=65)
         
-        # ── Update job.meta with SEO data immediately ─────────────────────────
-        if self.job.meta is None:
-            self.job.meta = {}
-        self.job.meta["seo_title"] = ai_payload.get("seo_title")
-        self.job.meta["seo_description"] = ai_payload.get("seo_description")
-        self.job.meta["target_keyword"] = ai_payload.get("target_keyword")
-        flag_modified(self.job, "meta")
-        self.db.commit()
+        # ── Stage 3: Parallel Asset Pipeline ──────────────────────────────────
+        self._set_job_status("generating_assets", progress=75)
+        from celery import group
+        from app.worker.tasks import process_single_asset
         
-        self._update_progress(60)
+        prompts = analysis.get("image_prompts", [])[:self.content_image_count + 1]
+        self._logger.info("reference_pipeline.parallel_assets.started", count=len(prompts))
 
-        # ── Stage 4: Generate images ──────────────────────────────────────────
-        self._set_job_status("generating_images", progress=65)
-        # We use prompts generated by Gemini in Stage 3
-        featured_image, content_images = self._generate_images_from_payload(ai_payload)
-        self._update_progress(80)
+        job_tasks = [
+            process_single_asset.s(p_data, str(self.job.integration_id) if self.job.integration_id else None) 
+            for p_data in prompts
+        ]
+        
+        results = group(job_tasks).apply_async().get(disable_sync_subtasks=False)
+        self._logger.info("reference_pipeline.parallel_assets.joined", success_count=len([r for r in results if r["status"] == "success"]))
 
-        # ── Stage 5: Sanitise + persist ───────────────────────────────────────
-        self._set_job_status("finalizing", progress=85)
-        self._finalize(
-            parsed_ai_payload=ai_payload,
-            featured_image=featured_image,
-            content_images=content_images
-        )
-        self._update_progress(95)
+        # ── Stage 4: HTML Structuring ─────────────────────────────────────────
+        self._set_job_status("writing", progress=85)
+        final_payload = self._generate_final_content(analysis, results)
+        
+        # ── Stage 5: Finalize & Speculative Sync ──────────────────────────────
+        self._finalize_refactored(final_payload, results)
+        self._set_job_status(JobStatus.COMPLETED.value, progress=100)
+        return {"status": "completed"}
 
-        self._logger.info("reference_pipeline.run.complete")
+    def _generate_final_content(self, analysis: dict, asset_results: list[dict]) -> dict:
+        from app.ai.gemini_rest_client import generate_content_rest
+        
+        image_markdown_map = {}
+        for i, res in enumerate(asset_results):
+            if res["status"] == "success":
+                url = res.get("wp_url") or f"data:image/webp;base64,{res['webp_base64']}"
+                image_markdown_map[f"IMAGE_PLACEHOLDER_{i}"] = url
+            else:
+                image_markdown_map[f"IMAGE_PLACEHOLDER_{i}"] = ""
+
+        prompt = f"""Write an SEO article in HTML.
+Focus Keyword: {analysis.get('focus_keyword')}
+Title: {analysis.get('title')}
+Inject {len(asset_results)} placeholders: <img src="IMAGE_PLACEHOLDER_N">.
+"""
+        raw_html = generate_content_rest(system_prompt=prompt, user_message=analysis.get("markdown_content", ""), logger=self._logger)
+        raw_html = re.sub(r"^```(?:html)?\s*", "", raw_html, flags=re.IGNORECASE).strip(" `\n")
+        
+        for key, val in image_markdown_map.items():
+            if val:
+                raw_html = raw_html.replace(key, val)
+            else:
+                raw_html = re.sub(f'<img[^>]*src="{key}"[^>]*>', "", raw_html)
+
         return {
-            "source_url": self.url,
-            "article_title": ai_payload.get("title"),
-            "target_keyword": ai_payload.get("target_keyword"),
-            "seo_title": ai_payload.get("seo_title"),
-            "seo_description": ai_payload.get("seo_description"),
+            "title": analysis["title"], 
+            "html_content": raw_html, 
+            "slug": analysis["slug"], 
+            "meta_description": analysis["seo_description"], 
+            "focus_keyword": analysis["focus_keyword"]
         }
 
-    # ── Stage implementations ─────────────────────────────────────────────────
-
-    def _fetch(self) -> str:
-        """
-        Fetch the source URL and extract article Markdown in one async call.
-
-        Bridges the async scraper to this synchronous pipeline via asyncio.run().
-        The Celery worker thread has no running event loop so this is safe.
-
-        Returns:
-            Clean Markdown string of the article body.
-
-        Raises:
-            ArticleFetchError: HTTP / network failure.
-            ArticleExtractionError: trafilatura found no usable content.
-        """
-        self._logger.info("reference_pipeline.fetch.start")
-        # asyncio.run() creates a brand-new event loop, runs the coroutine,
-        # closes the loop, and returns the result — thread-safe for Celery.
-        markdown: str = asyncio.run(extract_article_content(self.url))
-        return markdown
-
-    def _extract(self, raw_html: str) -> str:  # noqa: ARG002
-        """
-        Not called directly — extraction is bundled inside _fetch() via the
-        async scraper. Kept to satisfy the original stub contract.
-        """
-        # extraction happens inside extract_article_content(); this is a no-op.
-        return raw_html
-
-    def _rewrite(self, markdown_content: str) -> dict:
-        """
-        Call Gemini to rewrite the Markdown and provide metadata.
-
-        Returns:
-            Dict with keys: title, markdown_content, target_keyword, slug,
-                           seo_title, seo_description, image_x_prompt.
-
-        Raises:
-            GeminiWriterError: Any Vertex AI / generation failure.
-        """
-        self._logger.info("reference_pipeline.rewrite.start")
-        return rewrite_article_for_seo(markdown_content)
-
-    def _generate_images_from_payload(self, ai_payload: dict) -> tuple[dict | None, list[dict]]:
-        """
-        Generate images for the article using Imagen prompts from AI payload.
-        """
-        from app.ai.imagen_client import (
-            generate_section_image,
-            ImagenSafetyError,
-            ImagenError,
-        )
-
-        featured_image: dict | None = None
-        content_images: list[dict] = []
-
-        # ── 1. Featured image (image_1_prompt) ────────────────────────────────
-        if self.include_featured_image:
-            prompt = ai_payload.get("image_1_prompt")
-            if prompt:
-                self._logger.info("reference_pipeline.images.featured.start", prompt=prompt)
-                try:
-                    featured_image = generate_section_image(prompt, aspect_ratio="16:9")
-                    self._logger.info("reference_pipeline.images.featured.done")
-                except (ImagenSafetyError, ImagenError) as exc:
-                    self._logger.warning("reference_pipeline.images.featured.failed", error=str(exc))
-
-        # ── 2. Content images (image_2 to 5 prompts) ─────────────────────────
-        for i in range(2, self.content_image_count + 2):
-            prompt = ai_payload.get(f"image_{i}_prompt")
-            if prompt:
-                self._logger.info(f"reference_pipeline.images.content_{i}.start", prompt=prompt)
-                try:
-                    img = generate_section_image(prompt, aspect_ratio="16:9")
-                    content_images.append(img)
-                    self._logger.info(f"reference_pipeline.images.content_{i}.done")
-                except (ImagenSafetyError, ImagenError) as exc:
-                    self._logger.warning(f"reference_pipeline.images.content_{i}.failed", error=str(exc))
-
-        return featured_image, content_images
-
-    def _generate_images(self, article_title: str) -> tuple[dict | None, list[dict]]:
-        """Legacy method — redirected to _generate_images_from_payload."""
-        # This is just a stub for BasePipeline if needed
-        return None, []
-
-    def _finalize(
-        self,
-        parsed_ai_payload: dict,
-        featured_image: dict | None = None,
-        content_images: list[dict] | None = None
-    ) -> None:
-        """
-        Sanitise the AI-generated content and persist the Article to the database.
-        """
-        self._logger.info("reference_pipeline.finalize.start")
-
-        # ── HTML handling ────────────────────────────────────────────────────
-        # Now using html_content directly as requested from improved Gemini prompt
-        html_body = parsed_ai_payload.get("html_content", "")
-
-        # ── Image Placeholder Substitution ───────────────────────────────────
-        # Workflow 2: image_1 is featured, image_2..5 are content
-        all_generated_images = []
-        if featured_image:
-            all_generated_images.append(featured_image)
-        if content_images:
-            all_generated_images.extend(content_images)
-
-        if all_generated_images:
-            # Map "1" -> index 0 (featured), "2" -> index 1 (content 1), etc.
-            placeholder_map = {str(i+1): i for i in range(len(all_generated_images))}
-            html_body = _substitute_image_placeholders(
-                html_body, placeholder_map, all_generated_images, self._logger
-            )
-
-        # ── Defence-in-depth sanitisation ────────────────────────────────────
-        clean_html: str = bleach.clean(
-            html_body,
-            tags=_ALLOWED_TAGS,
-            attributes=_ALLOWED_ATTRIBUTES,
-            strip=True,
-            strip_comments=True,
-        )
-
-        title: str = parsed_ai_payload.get("title", "Untitled Article").strip()
-        slug: str = parsed_ai_payload.get("slug") or _slugify(title)
+    def _finalize_refactored(self, payload: dict, asset_results: list[dict]) -> None:
+        from app.worker.tasks import publish_article_to_wp
         
-        # Compile all image dicts for storage
-        all_images: list[dict] = []
-        if featured_image:
-            all_images.append({**featured_image, "role": "featured"})
-        if content_images:
-            for img in content_images:
-                all_images.append({**img, "role": "content"})
+        images_meta = []
+        for res in asset_results:
+            if res["status"] == "success":
+                images_meta.append({
+                    "url": res.get("wp_url"),
+                    "base64": res.get("webp_base64") if not res.get("wp_url") else None,
+                    "metadata": res.get("metadata")
+                })
 
-        # ── Upsert Article ───────────────────────────────────────────────────
-        article: Article | None = (
-            self.db.query(Article)
-            .filter(Article.job_id == self.job.id)
-            .first()
-        )
-
-        if article is None:
-            article = Article(
-                job_id=self.job.id,
-                user_id=self.job.user_id,
-                integration_id=self.job.integration_id,
-            )
+        article = self.db.query(Article).filter(Article.job_id == self.job.id).first()
+        if not article:
+            article = Article(job_id=self.job.id, user_id=self.job.user_id, integration_id=self.job.integration_id)
             self.db.add(article)
 
-        article.title = title
-        article.slug = slug
-        article.html_content = clean_html
-        article.focus_keyword = parsed_ai_payload.get("target_keyword")
-        article.meta_description = parsed_ai_payload.get("seo_description")
-        article.word_count = len(re.findall(r"\w+", clean_html))
-        article.images = all_images
-        article.source_urls = [self.url]
+        article.title, article.slug, article.html_content = payload["title"], payload["slug"], payload["html_content"]
+        article.focus_keyword, article.meta_description = payload["focus_keyword"], payload["meta_description"]
         article.article_status = ArticleStatus.DRAFT_READY
-        article.updated_at = datetime.now(timezone.utc)
-
-        # Save extra SEO metadata to job.meta for frontend visibility
-        if self.job.meta is None:
-            self.job.meta = {}
-        self.job.meta["seo_title"] = parsed_ai_payload.get("seo_title")
-        self.job.meta["seo_description"] = parsed_ai_payload.get("seo_description")
-        self.job.meta["target_keyword"] = parsed_ai_payload.get("target_keyword")
-        flag_modified(self.job, "meta")
-
+        article.meta = {"images": images_meta}
         self.db.commit()
 
-    # ── Private helpers ───────────────────────────────────────────────────────
+        if self.job.integration_id:
+            self._logger.info("reference_pipeline.wp_sync.dispatched")
+            publish_article_to_wp.delay(str(article.id))
 
     def _set_job_status(self, status: str, progress: int) -> None:
-        """Write a granular status string and progress percentage to the DB."""
-        self.job.status = status
-        self.job.progress_pct = progress
+        self.job.status, self.job.progress_pct = status, progress
         self.db.commit()
-
-
-# ── Module-level slug helper (avoids circular import with gemini_writer) ────────
-
-def _slugify(text: str) -> str:
-    """Minimal slug generator — mirrors the one in gemini_writer.py."""
-    import unicodedata
-    normalised = unicodedata.normalize("NFKD", text)
-    ascii_text = normalised.encode("ascii", "ignore").decode("ascii")
-    slug = re.sub(r"[^a-z0-9]+", "-", ascii_text.lower())
-    return slug.strip("-")[:580] or "article"

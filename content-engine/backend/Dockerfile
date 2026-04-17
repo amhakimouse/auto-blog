@@ -62,6 +62,10 @@ WORKDIR /app
 # Copy application source (in dev this is overridden by the volume mount)
 COPY --chown=appuser:appgroup . .
 
+# Copy entrypoint script
+COPY --chown=appuser:appgroup dev-entrypoint.sh /usr/local/bin/dev-entrypoint.sh
+RUN chmod +x /usr/local/bin/dev-entrypoint.sh
+
 # Switch to non-root user
 USER appuser
 

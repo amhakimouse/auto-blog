@@ -1,16 +1,38 @@
 import { useParams, Link } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { jobs } from '@/lib/api';
-import { Card, Button, Badge, Loading, Progress } from '@/components/ui';
-import { ArrowLeft, ExternalLink } from 'lucide-react';
+import { Card, Button, Badge, Loading, Progress, useToast } from '@/components/ui';
+import { ArrowLeft, ExternalLink, CheckCircle, RefreshCw } from 'lucide-react';
 import { format } from 'date-fns';
 
 export function JobDetailPage() {
   const { id } = useParams<{ id: string }>();
+  const queryClient = useQueryClient();
+  const { addToast } = useToast();
 
-  const { data: job, isLoading, error } = useQuery({
+  const { data: jobResponse, isLoading, error } = useQuery({
     queryKey: ['job', id],
-    queryFn: () => jobs.get(id!),
+    queryFn: async () => {
+        const response = await jobs.get(id!);
+        return (response as any).data || response;
+    },
+    refetchInterval: (data) => {
+        const job = (data as any);
+        return (job && (job.status === 'processing' || job.status === 'pending' || job.status === 'scraping' || job.status === 'analyzing')) ? 3000 : false;
+    }
+  });
+
+  const job = jobResponse;
+
+  const resumeMutation = useMutation({
+    mutationFn: () => jobs.resume(id!),
+    onSuccess: () => {
+      addToast('success', 'Generation resumed! Finalizing article...');
+      queryClient.invalidateQueries({ queryKey: ['job', id] });
+    },
+    onError: (err: any) => {
+      addToast('error', err.response?.data?.detail || 'Failed to resume job');
+    }
   });
 
   if (isLoading) {
@@ -30,7 +52,10 @@ export function JobDetailPage() {
 
   const timelineSteps = [
     { status: 'pending', label: 'Queued', description: 'Job added to queue' },
-    { status: 'processing', label: 'Processing', description: 'Generating content...' },
+    { status: 'scraping', label: 'Scraping', description: 'Fetching competitor data' },
+    { status: 'analyzing', label: 'Analyzing', description: 'Unified Gemini analysis' },
+    { status: 'awaiting_preview', label: 'Preview', description: 'Awaiting your approval' },
+    { status: 'processing', label: 'Generating', description: 'Building final assets & HTML' },
     { status: 'completed', label: 'Completed', description: 'Article ready' },
   ];
 
@@ -40,20 +65,33 @@ export function JobDetailPage() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center gap-4">
-        <Link to="/jobs">
-          <Button variant="ghost" size="sm" leftIcon={<ArrowLeft className="w-4 h-4" />}>
-            Back
-          </Button>
-        </Link>
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Job Details</h1>
-          <p className="text-gray-500 dark:text-gray-400">ID: {job.id}</p>
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-4">
+            <Link to="/jobs">
+            <Button variant="ghost" size="sm" leftIcon={<ArrowLeft className="w-4 h-4" />}>
+                Back
+            </Button>
+            </Link>
+            <div>
+            <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Job Details</h1>
+            <p className="text-gray-500 dark:text-gray-400">ID: {job.id}</p>
+            </div>
         </div>
+
+        {job.status === 'awaiting_preview' && (
+            <Button 
+                onClick={() => resumeMutation.mutate()} 
+                isLoading={resumeMutation.isPending}
+                leftIcon={<CheckCircle className="w-4 h-4" />}
+                className="bg-green-600 hover:bg-green-700"
+            >
+                Approve & Complete Generation
+            </Button>
+        )}
       </div>
 
       {/* Status Card */}
-      <Card>
+      <Card shadow="sm">
         <div className="flex items-start justify-between mb-6">
           <div>
             <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-1">
@@ -61,27 +99,27 @@ export function JobDetailPage() {
             </h2>
             <p className="text-gray-600 dark:text-gray-400">{job.input_keyword || job.input_url}</p>
           </div>
-          <Badge variant={job.status}>{job.status}</Badge>
+          <Badge variant={job.status}>{job.status.replace(/_/g, ' ')}</Badge>
           </div>
 
           {/* Progress */}
           <div className="mb-6">
           <div className="flex items-center justify-between mb-2">
-            <span className="text-sm font-medium text-gray-700 dark:text-gray-300">Progress</span>
+            <span className="text-sm font-medium text-gray-700 dark:text-gray-300">Overall Progress</span>
             <span className="text-sm text-gray-500">{job.progress_pct}%</span>
           </div>
           <Progress value={job.progress_pct} showLabel />
           </div>
         {/* Timeline */}
-        <div className="relative">
-          <div className="flex items-center justify-between">
+        <div className="relative pt-4 pb-8 overflow-x-auto">
+          <div className="flex items-center min-w-[800px] px-4">
             {timelineSteps.map((step, index) => (
               <div key={step.status} className="flex flex-col items-center flex-1 relative">
                 {/* Line */}
                 {index < timelineSteps.length - 1 && (
                   <div
                     className={`absolute top-4 left-1/2 w-full h-0.5 ${
-                      index < currentStepIndex || isFailed
+                      index < currentStepIndex || (job.status === 'completed')
                         ? 'bg-primary-500'
                         : 'bg-gray-200 dark:bg-gray-700'
                     }`}
@@ -89,17 +127,17 @@ export function JobDetailPage() {
                 )}
                 {/* Dot */}
                 <div
-                  className={`relative z-10 w-8 h-8 rounded-full flex items-center justify-center ${
-                    index < currentStepIndex || (isFailed && index === currentStepIndex)
-                      ? 'bg-primary-500 text-white'
+                  className={`relative z-10 w-8 h-8 rounded-full flex items-center justify-center transition-all duration-300 ${
+                    index < currentStepIndex || (job.status === 'completed')
+                      ? 'bg-primary-500 text-white shadow-lg shadow-primary-500/20'
                       : isFailed && index === currentStepIndex
                       ? 'bg-red-500 text-white'
                       : index === currentStepIndex
-                      ? 'bg-primary-100 dark:bg-primary-900/30 text-primary-600 dark:text-primary-400 ring-2 ring-primary-500'
+                      ? 'bg-primary-100 dark:bg-primary-900/30 text-primary-600 dark:text-primary-400 ring-4 ring-primary-50 dark:ring-primary-900/10'
                       : 'bg-gray-200 dark:bg-gray-700 text-gray-400'
                   }`}
                 >
-                  {index < currentStepIndex ? (
+                  {index < currentStepIndex || job.status === 'completed' ? (
                     <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
                       <path
                         fillRule="evenodd"
@@ -119,8 +157,9 @@ export function JobDetailPage() {
                     <span className="text-xs font-medium">{index + 1}</span>
                   )}
                 </div>
-                <span className="mt-2 text-sm font-medium text-gray-700 dark:text-gray-300">{step.label}</span>
-                <span className="text-xs text-gray-500 dark:text-gray-400 mt-1">{step.description}</span>
+                <span className={`mt-2 text-xs font-semibold text-center ${index === currentStepIndex ? 'text-primary-600 dark:text-primary-400' : 'text-gray-500'}`}>
+                  {step.label}
+                </span>
               </div>
             ))}
           </div>
@@ -135,64 +174,83 @@ export function JobDetailPage() {
         )}
       </Card>
 
+      {/* Unified Analysis Preview (Awaiting Preview Stage) */}
+      {job.meta?.unified_analysis && (
+        <Card title="Unified Analysis Preview" shadow="sm">
+          <div className="overflow-hidden border border-gray-200 dark:border-gray-700 rounded-lg">
+            <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+              <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700 text-sm">
+                <tr>
+                  <td className="px-4 py-3 font-medium text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-900/50 w-1/4">Focus Keyword</td>
+                  <td className="px-4 py-3 font-semibold text-primary-600">{job.meta.unified_analysis.focus_keyword}</td>
+                </tr>
+                <tr>
+                  <td className="px-4 py-3 font-medium text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-900/50">Article Title</td>
+                  <td className="px-4 py-3">{job.meta.unified_analysis.title}</td>
+                </tr>
+                <tr>
+                  <td className="px-4 py-3 font-medium text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-900/50">SEO Title</td>
+                  <td className="px-4 py-3">{job.meta.unified_analysis.seo_title}</td>
+                </tr>
+                <tr>
+                  <td className="px-4 py-3 font-medium text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-900/50">Slug</td>
+                  <td className="px-4 py-3"><code>{job.meta.unified_analysis.slug}</code></td>
+                </tr>
+                <tr>
+                  <td className="px-4 py-3 font-medium text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-900/50">SEO Description</td>
+                  <td className="px-4 py-3 text-gray-600 dark:text-gray-400">{job.meta.unified_analysis.seo_description}</td>
+                </tr>
+                <tr>
+                    <td className="px-4 py-3 font-medium text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-900/50">Image Prompts</td>
+                    <td className="px-4 py-3">
+                        <ul className="list-disc list-inside space-y-1">
+                            {job.meta.unified_analysis.image_prompts?.map((img: any, i: number) => (
+                                <li key={i} className="text-gray-600 dark:text-gray-400">
+                                    <span className="font-medium text-gray-900 dark:text-white">{img.title}:</span> {img.prompt}
+                                </li>
+                            ))}
+                        </ul>
+                    </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          {job.status === 'awaiting_preview' && (
+              <div className="mt-6 flex justify-end">
+                <Button 
+                    onClick={() => resumeMutation.mutate()} 
+                    isLoading={resumeMutation.isPending}
+                    leftIcon={<CheckCircle className="w-4 h-4" />}
+                >
+                    Approve & Start Final Generation
+                </Button>
+              </div>
+          )}
+        </Card>
+      )}
+
       {/* Details */}
-      <Card>
-        <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Details</h3>
+      <Card shadow="sm">
+        <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Meta Information</h3>
         <dl className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
             <dt className="text-sm text-gray-500 dark:text-gray-400">Created</dt>
-            <dd className="text-gray-900 dark:text-white">{format(new Date(job.created_at), 'MMM d, yyyy HH:mm')}</dd>
-          </div>
-          <div>
-            <dt className="text-sm text-gray-500 dark:text-gray-400">Last Updated</dt>
-            <dd className="text-gray-900 dark:text-white">{format(new Date(job.updated_at), 'MMM d, yyyy HH:mm')}</dd>
+            <dd className="text-gray-900 dark:text-white font-medium">{format(new Date(job.created_at), 'MMM d, yyyy HH:mm')}</dd>
           </div>
           <div>
             <dt className="text-sm text-gray-500 dark:text-gray-400">Workflow</dt>
-            <dd className="text-gray-900 dark:text-white capitalize">{job.workflow_type.replace(/_/g, ' ')}</dd>
+            <dd className="text-gray-900 dark:text-white capitalize font-medium">{job.workflow_type.replace(/_/g, ' ')}</dd>
           </div>
         </dl>
-
-        {job.meta?.seo_title && (
-          <div className="mt-6 pt-6 border-t border-gray-200 dark:border-dark-border">
-            <h4 className="text-sm font-medium text-gray-900 dark:text-white mb-4">SEO Analysis & Metadata</h4>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <div className="space-y-1">
-                <span className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wider">SEO Title</span>
-                <p className="text-sm text-gray-900 dark:text-white font-medium">{job.meta.seo_title}</p>
-              </div>
-              <div className="space-y-1">
-                <span className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wider">Target Keyword</span>
-                <p className="text-sm text-gray-900 dark:text-white font-medium">
-                  <Badge variant="secondary">{job.meta.target_keyword}</Badge>
-                </p>
-              </div>
-              <div className="md:col-span-2 space-y-1">
-                <span className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wider">SEO Description</span>
-                <p className="text-sm text-gray-700 dark:text-gray-300 leading-relaxed">{job.meta.seo_description}</p>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {job.meta?.extracted_source && (
-          <div className="mt-6 pt-6 border-t border-gray-200 dark:border-dark-border">
-            <h4 className="text-sm font-medium text-gray-900 dark:text-white mb-2">Extracted Source Content</h4>
-            <div className="bg-gray-50 dark:bg-dark-card p-4 rounded-lg max-h-60 overflow-y-auto">
-              <pre className="text-xs text-gray-600 dark:text-gray-400 whitespace-pre-wrap font-sans">
-                {job.meta.extracted_source}
-              </pre>
-            </div>
-          </div>
-        )}
       </Card>
 
       {/* View Article */}
       {job.status === 'completed' && (
         <div className="flex justify-end">
           <Link to={`/articles`}>
-            <Button rightIcon={<ExternalLink className="w-4 h-4" />}>
-              View in Articles List
+            <Button rightIcon={<ExternalLink className="w-4 h-4" />} shadow="lg">
+              View Final Article
             </Button>
           </Link>
         </div>

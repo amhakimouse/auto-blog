@@ -11,12 +11,14 @@ Extraction:
 """
 import random
 import asyncio
+import hashlib
 import structlog
 import httpx
 import trafilatura
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from app.config import settings
+from app.redis import get_redis_client
 
 log = structlog.get_logger(__name__)
 
@@ -32,6 +34,8 @@ class ArticleExtractionError(ArticleScraperError):
     """Raised when no usable content can be found."""
 
 # ── Constants ──────────────────────────────────────────────────────────────────
+
+_SCRAPER_CACHE_TTL = 86400  # 24 hours
 
 _USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -50,13 +54,36 @@ def _get_headers() -> dict[str, str]:
 
 async def extract_article_content(url: str) -> str:
     """
-    Tiered extraction strategy.
+    Tiered extraction strategy with Redis caching.
+    Lookup: scraper:md5(url) -> markdown content
     """
     logger = log.bind(url=url)
     
+    # ── Redis Cache-Aside Logic ───────────────────────────────────────────────
+    url_hash = hashlib.md5(url.encode()).hexdigest()
+    cache_key = f"scraper:{url_hash}"
+    
+    redis = get_redis_client()
+    try:
+        cached_content = redis.get(cache_key)
+        if cached_content:
+            logger.info("scraper.cache.hit", key=cache_key)
+            return cached_content
+    except Exception as exc:
+        logger.warning("scraper.cache.error", error=str(exc))
+    
+    # ── Live Scrape ───────────────────────────────────────────────────────────
+    logger.info("scraper.cache.miss", key=cache_key)
     html = await _fetch_raw_html(url, logger)
     content = _extract_markdown(html, url, logger)
+    
     if content:
+        # Update cache
+        try:
+            redis.setex(cache_key, _SCRAPER_CACHE_TTL, content)
+            logger.info("scraper.cache.updated", key=cache_key)
+        except Exception as exc:
+            logger.warning("scraper.cache.update_failed", error=str(exc))
         return content
 
     raise ArticleExtractionError(f"All scraping tiers failed for URL: {url}")

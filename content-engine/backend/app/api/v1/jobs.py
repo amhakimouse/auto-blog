@@ -391,3 +391,47 @@ async def cancel_job(
     job.completed_at = datetime.now(timezone.utc)
     await db.commit()
     log.info("jobs.cancelled", job_id=str(job_id))
+
+
+# ── POST /jobs/{job_id}/resume ────────────────────────────────────────────────
+
+@router.post(
+    "/{job_id}/resume",
+    response_model=JobRead,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Resume a job from awaiting_preview status",
+)
+async def resume_job(
+    job_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_active_user),
+) -> Job:
+    """
+    Resume a job that is currently in 'awaiting_preview' status.
+    This re-dispatches the Celery task which will proceed to the next stage.
+    """
+    result = await db.execute(
+        select(Job).where(Job.id == job_id, Job.user_id == user.id)
+    )
+    job = result.scalar_one_or_none()
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Job not found"
+        )
+
+    if job.status != JobStatus.AWAITING_PREVIEW.value:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Only jobs in '{JobStatus.AWAITING_PREVIEW.value}' state can be resumed."
+        )
+
+    # Dispatch Celery task again
+    workflow_enum = WorkflowType(job.workflow_type)
+    celery_result = celery_app.send_task(
+        _TASK_MAP[workflow_enum],
+        kwargs={"job_id": str(job.id)},
+        queue="default",
+    )
+    
+    log.info("jobs.resumed", job_id=str(job.id), celery_task_id=celery_result.id)
+    return job

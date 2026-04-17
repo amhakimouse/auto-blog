@@ -72,11 +72,14 @@ services:
     environment:
       - FLARESOLVERR_URL=http://flaresolverr:8191
     command: >
+      bash -c "pip install -r requirements.txt &&
       uvicorn app.main:app
       --host 0.0.0.0
       --port 8000
       --reload
       --reload-dir /app/app
+      --reload-include '*.py'
+      --reload-include '*.env'"
     ports:
       - "8000:8000"
     healthcheck:
@@ -90,16 +93,24 @@ services:
     <<: *backend-common
     environment:
       - FLARESOLVERR_URL=http://flaresolverr:8191
+    # Use watchmedo (from watchdog) to auto-restart Celery on code changes
     command: >
+      bash -c "pip install -r requirements.txt &&
+      watchmedo auto-restart
+      --directory=/app/app
+      --pattern='*.py'
+      --recursive
+      --
       celery -A app.worker.celery_app worker
       --loglevel=info
-      --concurrency=2
-      --queues=default,high_priority
+      --concurrency=1
+      --queues=default,high_priority"
     healthcheck:
       test: ["CMD-SHELL", "celery -A app.worker.celery_app inspect ping || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
+
 
   # ── FlareSolverr (Cloudflare Bypass) ────────────────────────────────────────
   flaresolverr:
@@ -169,6 +180,9 @@ services:
       - internal
     depends_on:
       - backend
+    command: >
+      sh -c "npm install --no-audit --no-fund --silent &&
+      npm run dev -- --host 0.0.0.0"
 
 volumes:
   postgres_data:

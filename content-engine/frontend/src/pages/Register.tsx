@@ -39,11 +39,24 @@ export function RegisterPage() {
         password,
         full_name: name
       });
-      login(response.access_token, response.user);
+      
+      // Axios returns data in .data
+      const data = (response as any).data || response;
+      
+      login(data.access_token, data.user);
       addToast('success', 'Account created successfully!');
       navigate('/dashboard');
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Registration failed');
+      console.error('Registration error:', err);
+      const detail = err.response?.data?.detail;
+      
+      if (Array.isArray(detail)) {
+        setError(detail[0]?.msg || 'Validation error');
+      } else if (typeof detail === 'object' && detail !== null) {
+        setError(JSON.stringify(detail));
+      } else {
+        setError(detail || 'Registration failed');
+      }
     } finally {
       setIsLoading(false);
     }

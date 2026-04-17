@@ -224,6 +224,136 @@ run_reference_to_article = celery_app.register_task(
     _ReferenceToArticleTask()
 )
 
+
+# ── Parallel Asset Processing ────────────────────────────────────────────────
+
+@celery_app.task(
+    name="app.worker.tasks.process_single_asset",
+    bind=True,
+    max_retries=2,
+    queue="heavy-lifting",
+)
+def process_single_asset(self, p_data: dict, integration_id: str | None = None) -> dict:
+    """
+    Atomic task: 
+    1. Generate via Imagen
+    2. Convert to WebP
+    3. Upload to WP (if integrated)
+    """
+    logger = log.bind(task="process_single_asset", prompt=p_data.get("title"))
+    logger.info("asset_task.start")
+    
+    from app.ai.imagen_client import generate_section_image
+    from app.utils.image import convert_to_webp
+    from app.integrations.wordpress import WordPressPublisher, is_wordpress_configured
+    import asyncio as _asyncio
+    import base64 as _b64
+
+    try:
+        # 1. Generate
+        img_res = generate_section_image(p_data["prompt"], aspect_ratio="16:9")
+        
+        # 2. Convert
+        webp_bytes = convert_to_webp(img_res["base64_image"])
+        
+        # 3. WP Upload (speculative)
+        wp_url = None
+        if integration_id:
+            with _SyncSession() as db:
+                integration = db.query(Integration).filter(Integration.id == uuid.UUID(integration_id)).first()
+                if integration and is_wordpress_configured(integration.wp_url, integration.wp_username, integration.wp_password):
+                    publisher = WordPressPublisher(integration.wp_url, integration.wp_username, integration.wp_password)
+                    # We create a temporary client here for sync execution
+                    try:
+                        upload_res = _asyncio.run(publisher._upload_media(
+                            client=None, # _upload_media handles client creation if None
+                            image_bytes=webp_bytes,
+                            filename=f"asset_{uuid.uuid4().hex[:8]}.webp",
+                            alt_text=p_data.get("alt_text", ""),
+                            caption=p_data.get("caption", ""),
+                            description=p_data.get("description", ""),
+                        ))
+                        wp_url = upload_res.get("source_url")
+                    except Exception as wp_exc:
+                        logger.warning("asset_task.wp_upload_failed", error=str(wp_exc))
+
+        logger.info("asset_task.success", wp_url=wp_url)
+        return {
+            "status": "success",
+            "webp_base64": _b64.b64encode(webp_bytes).decode("utf-8"),
+            "wp_url": wp_url,
+            "metadata": p_data
+        }
+
+    except Exception as exc:
+        logger.error("asset_task.failed", error=str(exc))
+        # Fail gracefully: return partial data so the pipeline can continue
+        return {
+            "status": "failed",
+            "error": str(exc),
+            "metadata": p_data
+        }
+
+
+# ── Detached Final Publish ───────────────────────────────────────────────────
+
+@celery_app.task(
+    name="app.worker.tasks.publish_article_to_wp",
+    bind=True,
+    max_retries=3,
+    queue="io-bound",
+)
+def publish_article_to_wp(self, article_id: str) -> dict:
+    """
+    Detached task to handle WordPress posting and RankMath sync.
+    Marked as DRAFT initially for safety.
+    """
+    logger = log.bind(task="publish_article_to_wp", article_id=article_id)
+    logger.info("publish_task.start")
+    
+    from app.integrations.wordpress import WordPressPublisher, is_wordpress_configured
+    import asyncio as _asyncio
+    import base64 as _b64
+
+    with _SyncSession() as db:
+        article = db.query(Article).filter(Article.id == uuid.UUID(article_id)).first()
+        if not article or not article.integration_id:
+            logger.error("publish_task.aborted", reason="Article or Integration missing")
+            return {"status": "error"}
+
+        integration = db.query(Integration).filter(Integration.id == article.integration_id).first()
+        if not integration:
+            return {"status": "error"}
+
+        publisher = WordPressPublisher(integration.wp_url, integration.wp_username, integration.wp_password)
+        
+        try:
+            # Featured image bytes if available
+            # ... (logic to find featured image from article.images if stored) ...
+            
+            pub_result = _asyncio.run(publisher.publish(
+                title=article.title,
+                html_content=article.html_content,
+                slug=article.slug,
+                meta_description=article.meta_description,
+                focus_keyword=article.focus_keyword,
+                post_status="draft"
+            ))
+            
+            article.wp_post_id = pub_result["wp_post_id"]
+            article.wp_post_url = pub_result["wp_post_url"]
+            article.article_status = ArticleStatus.PUBLISHED
+            db.commit()
+            
+            logger.info("publish_task.success", post_id=article.wp_post_id)
+            return {"status": "success", "post_id": article.wp_post_id}
+            
+        except Exception as exc:
+            logger.error("publish_task.failed", error=str(exc))
+            article.article_status = ArticleStatus.PUBLISH_FAILED
+            db.commit()
+            raise self.retry(exc=exc, countdown=300)
+
 # ═════════════════════════════════════════════════════════════════════════════
 # Background maintenance tasks
 # ═════════════════════════════════════════════════════════════════════════════

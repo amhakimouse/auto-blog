@@ -96,19 +96,20 @@ class _VertexAIAuth:
 # ── REST API Client ────────────────────────────────────────────────────────────
 
 
-def _build_api_url(model_id: str) -> str:
-    """Build the Vertex AI REST API URL for the given model using the global endpoint."""
+def _build_api_url(model_id: str, cached_content: str | None = None) -> str:
+    """Build the Vertex AI REST API URL for the given model."""
     project_id = settings.gcp_project_id
-
+    
+    # If cached_content is provided, it's a full resource name
+    # e.g. projects/{project_id}/locations/{region}/cachedContents/{id}
+    
     # Remove 'models/' prefix if present
     if model_id.startswith("models/"):
         model_id = model_id[7:]
     
-    # Ensure we use gemini-2.5-flash as requested if not specified
     if not model_id:
         model_id = "gemini-2.5-flash"
 
-    # Using 'global' location as requested ("no region")
     return (
         f"https://aiplatform.googleapis.com/v1/"
         f"projects/{project_id}/locations/global/"
@@ -120,23 +121,14 @@ def _build_request_payload(
     system_instruction: str | None,
     user_message: str,
     generation_config: dict | None = None,
+    cached_content: str | None = None,
 ) -> dict:
-    """Build the JSON payload for the Gemini API request as specifically requested."""
-    # The user requested this exact structure:
-    # {
-    #   "contents": [{"role": "user", "parts": [{"text": "{{prompt}}"}]}],
-    #   "generationConfig": {"candidateCount": 1, "responseModalities": ["TEXT"]}
-    # }
-    
-    prompt = user_message
-    if system_instruction:
-        prompt = f"{system_instruction}\n\nUser Input: {user_message}"
-
+    """Build the JSON payload for the Gemini API request."""
     payload: dict[str, Any] = {
         "contents": [
             {
                 "role": "user",
-                "parts": [{"text": prompt}],
+                "parts": [{"text": user_message}],
             }
         ],
         "generationConfig": {
@@ -145,67 +137,93 @@ def _build_request_payload(
         }
     }
 
-    # Merge additional config if provided (like temperature, responseSchema)
+    if system_instruction and not cached_content:
+        # If no cache, we inject system instructions into the prompt or content
+        # Better approach for Vertex AI: add systemInstruction object
+        payload["systemInstruction"] = {
+            "parts": [{"text": system_instruction}]
+        }
+    
+    if cached_content:
+        # Use existing context cache
+        payload["cachedContent"] = cached_content
+
+    # Merge additional config if provided
     if generation_config:
         for k, v in generation_config.items():
-            # Map snake_case to camelCase for Vertex AI REST API
             api_key = k
             if k == "response_schema":
                 api_key = "responseSchema"
-                # If schema is provided, we MUST set responseMimeType to application/json
                 payload["generationConfig"]["responseMimeType"] = "application/json"
             
             if api_key not in payload["generationConfig"]:
                 payload["generationConfig"][api_key] = v
-            elif api_key == "responseMimeType": # allow override
+            elif api_key == "responseMimeType":
                 payload["generationConfig"][api_key] = v
 
     return payload
 
 
-def _parse_response(response_text: str) -> str:
-    """
-    Parse the JSON response from Gemini (handles both unary and streaming array).
-    Returns the concatenated text from all candidates/chunks.
-    """
-    full_text = []
+# ── Context Caching Management ────────────────────────────────────────────────
 
-    try:
-        data = json.loads(response_text)
-    except json.JSONDecodeError as exc:
-        log.error("gemini_rest.json_decode_error", error=str(exc))
-        # If it's not valid JSON, it might be raw text or a partial stream
-        return response_text
 
-    # Handle streaming array [obj, obj, ...]
-    if isinstance(data, list):
-        chunks = data
-    else:
-        # Handle unary object {candidates: [...]}
-        chunks = [data]
+class ContextCacheManager:
+    """Manages Vertex AI Context Caching via REST API."""
 
-    for chunk in chunks:
-        # Extract text from candidates
-        candidates = chunk.get("candidates", [])
-        for candidate in candidates:
-            # Check for error in candidate
-            if "error" in candidate:
-                err = candidate["error"]
-                log.error("gemini_rest.candidate_error", code=err.get("code"), message=err.get("message"))
-                continue
+    @classmethod
+    def get_cache_url(cls) -> str:
+        return (
+            f"https://aiplatform.googleapis.com/v1/"
+            f"projects/{settings.gcp_project_id}/locations/global/cachedContents"
+        )
 
-            content = candidate.get("content", {})
-            parts = content.get("parts", [])
-            for part in parts:
-                if "text" in part:
-                    full_text.append(part["text"])
+    @classmethod
+    def create_cache(
+        cls, 
+        system_instruction: str, 
+        contents: list[dict], 
+        model: str = "gemini-2.5-flash",
+        ttl_seconds: int = 3600
+    ) -> str:
+        """
+        Create a new cached content resource.
+        Returns the resource name (id).
+        """
+        log.info("gemini_cache.create.start", model=model, ttl=ttl_seconds)
+        
+        # Vertex AI REST expects 'models/...' prefix for the model field in cachedContent
+        if not model.startswith("models/"):
+            model = f"publishers/google/models/{model}"
 
-            # Check for finish reason
-            finish_reason = candidate.get("finishReason")
-            if finish_reason and finish_reason not in ("STOP", "MAX_TOKENS"):
-                log.warning("gemini_rest.finish_reason", reason=finish_reason)
+        payload = {
+            "model": model,
+            "systemInstruction": {
+                "parts": [{"text": system_instruction}]
+            },
+            "contents": contents,
+            "ttl": f"{ttl_seconds}s"
+        }
 
-    return "".join(full_text)
+        token = _VertexAIAuth.get_access_token()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            with httpx.Client(timeout=30.0) as client:
+                response = client.post(cls.get_cache_url(), json=payload, headers=headers)
+                if response.status_code != 200:
+                    log.error("gemini_cache.create.failed", status=response.status_code, body=response.text)
+                    response.raise_for_status()
+                
+                data = response.json()
+                cache_name = data["name"]
+                log.info("gemini_cache.create.success", name=cache_name)
+                return cache_name
+        except Exception as exc:
+            log.error("gemini_cache.create.error", error=str(exc))
+            raise GeminiApiError(f"Failed to create context cache: {exc}") from exc
 
 
 def generate_content_rest(
@@ -213,19 +231,21 @@ def generate_content_rest(
     user_message: str,
     model: str | None = None,
     generation_config: dict | None = None,
+    cached_content: str | None = None,
     logger: Any | None = None,
 ) -> str:
     """
     Call Gemini via REST API and return the generated text.
+    Supports optional cached_content ID.
     """
     logger = logger or log
     model_id = model or settings.vertex_ai_model
 
-    logger.info("gemini_rest.request.start", model=model_id)
+    logger.info("gemini_rest.request.start", model=model_id, cached=bool(cached_content))
 
     # Build request
     url = _build_api_url(model_id)
-    payload = _build_request_payload(system_prompt, user_message, generation_config)
+    payload = _build_request_payload(system_prompt, user_message, generation_config, cached_content)
     token = _VertexAIAuth.get_access_token()
 
     headers = {

@@ -23,6 +23,8 @@ tenacity>=8.3.0
 
 # Task Queue
 celery[redis]>=5.4.0
+redis>=5.0.0
+watchdog>=4.0.0
 
 # Scraping & AI
 trafilatura>=1.10.0

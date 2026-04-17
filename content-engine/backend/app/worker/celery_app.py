@@ -42,10 +42,17 @@ celery_app.conf.update(
     task_default_queue="default",
     task_queues={
         "default": {"exchange": "default", "routing_key": "default"},
-        "high_priority": {
-            "exchange": "high_priority",
-            "routing_key": "high_priority",
-        },
+        "fast-track": {"exchange": "fast-track", "routing_key": "fast-track"},      # Analysis & HTML (LLM)
+        "heavy-lifting": {"exchange": "heavy-lifting", "routing_key": "heavy-lifting"}, # Image Gen (Imagen)
+        "io-bound": {"exchange": "io-bound", "routing_key": "io-bound"},           # WP Sync & Scrapers
+    },
+    
+    # ── Task Routing ─────────────────────────────────────────────────────────
+    task_routes={
+        "app.worker.tasks.run_keyword_to_article": {"queue": "fast-track"},
+        "app.worker.tasks.run_reference_to_article": {"queue": "fast-track"},
+        "app.worker.tasks.process_single_asset": {"queue": "heavy-lifting"},
+        "app.worker.tasks.publish_article_to_wp": {"queue": "io-bound"},
     },
 
     # ── Task autodiscovery ───────────────────────────────────────────────────

@@ -183,10 +183,13 @@ class WordPressPublisher:
         html_content: str,
         *,
         image_bytes: bytes | None = None,
-        image_filename: str = "featured-image.png",
+        image_filename: str = "featured-image.webp",
         image_alt: str = "",
+        image_caption: str = "",
+        image_description: str = "",
         slug: str | None = None,
         meta_description: str | None = None,
+        focus_keyword: str | None = None,
         tags: list[int] | None = None,
         categories: list[int] | None = None,
         post_status: str = _DEFAULT_POST_STATUS,
@@ -222,6 +225,8 @@ class WordPressPublisher:
                     image_bytes=image_bytes,
                     filename=image_filename,
                     alt_text=image_alt or title,
+                    caption=image_caption,
+                    description=image_description,
                 )
                 featured_media_id = upload_result["id"]
                 featured_image_url = upload_result.get("source_url")
@@ -244,8 +249,24 @@ class WordPressPublisher:
                 post_status=post_status,
             )
 
+            wp_post_id = post_result["id"]
+
+            # ── Step 3: Update RankMath SEO Meta (optional) ────────────────────
+            if focus_keyword or meta_description:
+                try:
+                    await self.update_rankmath_seo(
+                        client=client,
+                        post_id=wp_post_id,
+                        focus_keyword=focus_keyword,
+                        meta_description=meta_description,
+                        seo_title=title, # Default to post title
+                    )
+                except Exception as exc:
+                    # Don't fail the whole publish if only SEO meta fails
+                    self._logger.warning("wordpress.rankmath.failed", error=str(exc))
+
         result = {
-            "wp_post_id": post_result["id"],
+            "wp_post_id": wp_post_id,
             "wp_post_url": post_result.get("link", ""),
             "featured_image_url": featured_image_url,
         }
@@ -265,22 +286,11 @@ class WordPressPublisher:
         image_bytes: bytes,
         filename: str,
         alt_text: str,
+        caption: str = "",
+        description: str = "",
     ) -> dict:
         """
         Upload image bytes to the WP Media Library via multipart/form-data.
-
-        Args:
-            client: Shared httpx.AsyncClient with auth headers.
-            image_bytes: Raw image bytes (PNG or JPEG).
-            filename: e.g. "hero-image.png".
-            alt_text: Alt text string set on the WP attachment.
-
-        Returns:
-            Dict from WP API: ``{id, source_url, …}``.
-
-        Raises:
-            WordPressAuthError: 401/403 response.
-            WordPressMediaUploadError: Any other failure.
         """
         self._logger.info(
             "wordpress.media.upload.start",
@@ -289,9 +299,10 @@ class WordPressPublisher:
         )
 
         mime_type, _ = mimetypes.guess_type(filename)
-        mime_type = mime_type or "image/png"
+        mime_type = mime_type or "image/webp"
 
         try:
+            # 1. Upload the file
             response = await client.post(
                 _MEDIA_ENDPOINT,
                 content=image_bytes,
@@ -299,28 +310,64 @@ class WordPressPublisher:
                     "Content-Disposition": f'attachment; filename="{filename}"',
                     "Content-Type": mime_type,
                 },
-                params={"alt_text": alt_text},
             )
+            response.raise_for_status()
+            data = response.json()
+            media_id = data["id"]
+
+            # 2. Immediately update metadata (alt text, caption, description)
+            update_payload = {
+                "alt_text": alt_text,
+                "caption": caption,
+                "description": description,
+            }
+            await client.post(
+                f"{_MEDIA_ENDPOINT}/{media_id}",
+                json=update_payload,
+            )
+            
+            return data
         except httpx.RequestError as exc:
             raise WordPressMediaUploadError(
                 f"Network error uploading media to {self._base_url}: {exc}"
             ) from exc
 
-        self._handle_auth_errors(response, context="media upload")
+    async def update_rankmath_seo(
+        self,
+        client: httpx.AsyncClient,
+        post_id: int,
+        focus_keyword: str | None = None,
+        meta_description: str | None = None,
+        seo_title: str | None = None,
+    ) -> dict:
+        """
+        Update SEO metadata via the RankMath REST API.
+        Endpoint: POST /wp-json/rank-math/v1/updateMeta
+        """
+        self._logger.info("wordpress.rankmath.update.start", post_id=post_id)
+        
+        endpoint = "wp-json/rank-math/v1/updateMeta"
+        payload = {"objectID": post_id, "objectType": "post", "meta": {}}
+        
+        if focus_keyword:
+            payload["meta"]["rank_math_focus_keyword"] = focus_keyword
+        if meta_description:
+            payload["meta"]["rank_math_description"] = meta_description
+        if seo_title:
+            payload["meta"]["rank_math_title"] = seo_title
 
-        if response.status_code not in (200, 201):
-            raise WordPressMediaUploadError(
-                f"WP media upload returned HTTP {response.status_code}: "
-                f"{response.text[:300]}"
-            )
-
-        data: dict = response.json()
-        self._logger.info(
-            "wordpress.media.upload.done",
-            media_id=data.get("id"),
-            source_url=data.get("source_url"),
-        )
-        return data
+        try:
+            response = await client.post(endpoint, json=payload)
+            # RankMath API might return 404 if plugin is not active
+            if response.status_code == 404:
+                self._logger.warning("wordpress.rankmath.plugin_not_found")
+                return {}
+            
+            response.raise_for_status()
+            return response.json()
+        except httpx.RequestError as exc:
+            self._logger.warning("wordpress.rankmath.network_error", error=str(exc))
+            return {}
 
     # ── Private: Post creation ────────────────────────────────────────────────
 

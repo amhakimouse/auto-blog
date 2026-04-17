@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import json
 import re
+import hashlib
 import unicodedata
 
 import bleach
 import structlog
 
 from app.config import settings
+from app.redis import get_redis_client
 
 log = structlog.get_logger(__name__)
 
@@ -381,6 +383,86 @@ def _slugify(text: str) -> str:
     return slug[:580] or "article"
 
 
+# ── Unified Analysis Pattern ──────────────────────────────────────────────────
+
+_UNIFIED_ANALYSIS_SYSTEM_PROMPT = """\
+You are an Expert Content Strategist and SEO Copywriter. Your task is to perform a deep analysis of the provided content and return a structured JSON plan for a new high-quality article.
+
+JSON SCHEMA REQUIREMENTS:
+Reply with a SINGLE valid JSON object containing:
+- "title": A compelling, SEO-optimised H1 title.
+- "markdown_content": A brief summary or high-level overview of the intended article (not the full article yet).
+- "slug": A URL-friendly slug.
+- "focus_keyword": The primary keyword to target.
+- "seo_title": An optimised meta title (max 60 chars).
+- "seo_description": A compelling meta description (max 160 chars).
+- "image_prompts": An array of objects, each with:
+    - "prompt": Detailed Imagen generation prompt (style: photorealistic, 8k, professional).
+    - "title": Title for the image.
+    - "alt_text": Descriptive alt text.
+    - "caption": Engaging caption.
+    - "description": Detailed description for the media library.
+
+CRITICAL: Return ONLY valid JSON. No preamble, no markdown blocks.
+"""
+
+_UNIFIED_ANALYSIS_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "title": {"type": "STRING"},
+        "markdown_content": {"type": "STRING"},
+        "slug": {"type": "STRING"},
+        "focus_keyword": {"type": "STRING"},
+        "seo_title": {"type": "STRING"},
+        "seo_description": {"type": "STRING"},
+        "image_prompts": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "prompt": {"type": "STRING"},
+                    "title": {"type": "STRING"},
+                    "alt_text": {"type": "STRING"},
+                    "caption": {"type": "STRING"},
+                    "description": {"type": "STRING"},
+                },
+                "required": ["prompt", "title", "alt_text"],
+            },
+        },
+    },
+    "required": ["title", "slug", "focus_keyword", "seo_title", "seo_description", "image_prompts"],
+}
+
+def run_unified_analysis(source_content: str, logger: structlog.BoundLogger | None = None) -> dict:
+    """
+    Perform a single-shot Gemini 2.5 Flash request to extract all SEO and content parameters.
+    Implements a self-correction loop for JSONDecodeError.
+    """
+    if logger is None:
+        logger = log.bind(model="gemini-2.5-flash")
+
+    logger.info("gemini_writer.unified_analysis.start", input_chars=len(source_content))
+
+    user_message = (
+        "Analyze the following source material and provide the requested Unified Analysis JSON:\n\n"
+        f"--- SOURCE MATERIAL START ---\n{source_content[:15000]}\n--- SOURCE MATERIAL END ---"
+    )
+
+    # Use _call_gemini_json which already has a retry loop for JSON errors
+    try:
+        result = _call_gemini_json(
+            system_prompt=_UNIFIED_ANALYSIS_SYSTEM_PROMPT,
+            user_message=user_message,
+            logger=logger,
+            temperature=0.2, # Lower temperature for better JSON consistency
+            response_schema=_UNIFIED_ANALYSIS_SCHEMA,
+        )
+        logger.info("gemini_writer.unified_analysis.success", title=result.get("title"))
+        return result
+    except Exception as exc:
+        logger.error("gemini_writer.unified_analysis.failed", error=str(exc))
+        raise GeminiWriterError(f"Unified Analysis failed: {exc}")
+
 # ═════════════════════════════════════════════════════════════════════════════
 # Workflow 1 Functions
 # ═════════════════════════════════════════════════════════════════════════════
@@ -503,6 +585,72 @@ def write_article_from_outline(
                 section_html = _extract_response_text(response, logger)
             
             section_html = re.sub(r"^```(?:html)?\s*", "", section_html, flags=re.IGNORECASE)
+            section_html = re.sub(r"\s*```$", "", section_html).strip()
+            html_parts.append(section_html)
+        except Exception as exc:
+            logger.error("write_section.failed", idx=idx, error=str(exc))
+
+    raw_html = "\n\n".join(html_parts)
+    raw_html = _substitute_image_placeholders(raw_html, image_placeholder_map, generated_images, logger)
+    clean_html = bleach.clean(raw_html, tags=_ALLOWED_TAGS, attributes=_ALLOWED_ATTRIBUTES, strip=True)
+
+    return {
+        "title": title,
+        "html_content": clean_html,
+        "word_count": len(re.findall(r"\w+", clean_html)),
+        "slug": _slugify(title),
+        "meta_description": meta.get("meta_description", ""),
+    }
+
+def _substitute_image_placeholders(html: str, placeholder_map: dict[str, int], images: list[dict], logger: structlog.BoundLogger) -> str:
+    def _replace(match: re.Match) -> str:
+        placeholder_id = match.group(1)
+        idx = placeholder_map.get(placeholder_id)
+        if idx is not None and idx < len(images):
+            img = images[idx]
+            if img.get("base64_image"):
+                return f"data:{img.get('mime_type', 'image/png')};base64,{img['base64_image']}"
+            return img.get("url", "")
+        return ""
+    return re.sub(r"IMAGE_PLACEHOLDER_(\w+)", _replace, html)
+
+def _call_gemini_json(
+    system_prompt: str,
+    user_message: str,
+    logger: structlog.BoundLogger,
+    temperature: float = 0.6,
+    response_schema: dict | None = None,
+) -> dict:
+    _MAX_RETRIES = 2
+    
+    def _get_raw():
+        if USE_REST_API:
+            return generate_content_rest(
+                system_prompt=system_prompt,
+                user_message=user_message,
+                generation_config={"temperature": temperature, "response_schema": response_schema} if response_schema else {"temperature": temperature},
+                logger=logger,
+            )
+        else:
+            model = GenerativeModel(model_name=settings.vertex_ai_model, system_instruction=system_prompt)
+            gen_config = GenerationConfig(
+                temperature=temperature,
+                response_mime_type="application/json",
+            )
+            response = model.generate_content(contents=[Part.from_text(user_message)], generation_config=gen_config, safety_settings=_SAFETY_SETTINGS)
+            return _extract_response_text(response, logger)
+
+    attempt = 0
+    while attempt <= _MAX_RETRIES:
+        try:
+            raw = _get_raw()
+            return _parse_json_response(raw, logger)
+        except Exception as exc:
+            if attempt >= _MAX_RETRIES: raise
+            attempt += 1
+            logger.warning("gemini.retry", attempt=attempt, error=str(exc))
+    return {}
+`(?:html)?\s*", "", section_html, flags=re.IGNORECASE)
             section_html = re.sub(r"\s*```$", "", section_html).strip()
             html_parts.append(section_html)
         except Exception as exc:

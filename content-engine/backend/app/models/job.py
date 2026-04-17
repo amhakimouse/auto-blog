@@ -23,6 +23,7 @@ from app.database import Base
 class JobStatus(str, Enum):
     PENDING = "pending"
     PROCESSING = "processing"
+    AWAITING_PREVIEW = "awaiting_preview"
     COMPLETED = "completed"
     FAILED = "failed"
 

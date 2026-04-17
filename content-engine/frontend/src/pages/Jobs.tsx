@@ -15,15 +15,24 @@ export function JobsPage() {
   const queryClient = useQueryClient();
   const { addToast } = useToast();
 
-  const { data: jobsData, isLoading } = useQuery({
+  const { data: jobsResponse, isLoading } = useQuery({
     queryKey: ['jobs', offset],
-    queryFn: () => jobs.list(20, offset),
+    queryFn: async () => {
+      const response = await jobs.list(20, offset);
+      return (response as any).data || response;
+    },
   });
 
-  const { data: integrationsData } = useQuery({
+  const { data: integrationsResponse } = useQuery({
     queryKey: ['integrations'],
-    queryFn: integrations.list,
+    queryFn: async () => {
+      const response = await integrations.list();
+      return (response as any).data || response;
+    },
   });
+
+  const jobsData = Array.isArray(jobsResponse) ? jobsResponse : [];
+  const integrationsData = Array.isArray(integrationsResponse) ? integrationsResponse : [];
 
   const cancelMutation = useMutation({
     mutationFn: jobs.cancel,
@@ -167,7 +176,7 @@ export function JobsPage() {
       <CreateJobModal
         isOpen={isCreateModalOpen}
         onClose={() => setIsCreateModalOpen(false)}
-        integrations={integrationsData || []}
+        integrationsList={integrationsData || []}
       />
     </div>
   );
@@ -176,10 +185,10 @@ export function JobsPage() {
 interface CreateJobModalProps {
   isOpen: boolean;
   onClose: () => void;
-  integrations: Integration[];
+  integrationsList: Integration[];
 }
 
-function CreateJobModal({ isOpen, onClose, integrations }: CreateJobModalProps) {
+function CreateJobModal({ isOpen, onClose, integrationsList }: CreateJobModalProps) {
   const [activeTab, setActiveTab] = useState<'keyword' | 'reference'>('keyword');
   const [keyword, setKeyword] = useState('');
   const [referenceUrl, setReferenceUrl] = useState('');
@@ -306,7 +315,7 @@ function CreateJobModal({ isOpen, onClose, integrations }: CreateJobModalProps) 
                 onChange={(e) => setIntegrationId(e.target.value)}
                 options={[
                   { value: '', label: 'Select brand...' },
-                  ...integrations.map((i: Integration) => ({ value: i.id, label: i.site_name })),
+                  ...integrationsList.map((i: Integration) => ({ value: i.id, label: i.site_name })),
                 ]}
               />
 
@@ -391,7 +400,7 @@ function CreateJobModal({ isOpen, onClose, integrations }: CreateJobModalProps) 
                 onChange={(e) => setIntegrationId(e.target.value)}
                 options={[
                   { value: '', label: 'Select brand...' },
-                  ...integrations.map((i: Integration) => ({ value: i.id, label: i.site_name })),
+                  ...integrationsList.map((i: Integration) => ({ value: i.id, label: i.site_name })),
                 ]}
               />
 
