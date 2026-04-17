@@ -7,9 +7,9 @@ Update this file when you discover or fix issues.
 
 ## Active Issues
 
-### 1. `bleach` allowlist duplicated in 3 places
-**Files:** `ai/gemini_writer.py`, `pipelines/keyword_pipeline.py`, `pipelines/reference_pipeline.py`  
-**Impact:** Medium — updating the tag allowlist requires 3 edits.  
+### 1. `bleach` allowlist duplicated in 4 places
+**Files:** `ai/gemini_writer.py`, `pipelines/keyword_pipeline.py`, `pipelines/reference_pipeline.py`, `api/v1/articles.py`  
+**Impact:** Medium — updating the tag allowlist requires 4 edits.  
 **Fix:** Consolidate into `utils/html.py` and import from there.
 
 ### 2. `sync_wp_links` Celery Beat task has no `integration_id` passed

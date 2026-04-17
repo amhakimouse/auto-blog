@@ -93,24 +93,6 @@ _DEFAULT_POST_STATUS: Final[str] = "publish"
 class WordPressPublisher:
     """
     Async WordPress article publisher using the WP REST API.
-
-    Intended to be called from inside a Celery pipeline via ``asyncio.run()``.
-
-    Usage::
-
-        publisher = WordPressPublisher()
-        result = asyncio.run(publisher.publish(
-            title="My Article",
-            html_content="<h2>Hello</h2><p>World</p>",
-            image_bytes=png_bytes,          # optional
-            image_filename="hero.png",      # optional
-            image_alt="Hero image",         # optional
-            slug="my-article",             # optional
-            meta_description="...",        # optional
-            tags=[],                       # optional WP tag IDs
-            categories=[],                # optional WP category IDs
-        ))
-        # result = {"wp_post_id": 42, "wp_post_url": "https://..."}
     """
 
     def __init__(
@@ -119,13 +101,13 @@ class WordPressPublisher:
         wp_username: str,
         wp_app_password: str,
     ) -> None:
-        # Strip spaces from Application Password (WP generates them with spaces)
-        raw_password = wp_app_password.replace(" ", "")
-        credentials = f"{wp_username}:{raw_password}"
-        encoded = base64.b64encode(credentials.encode()).decode()
-
-        self._base_url: str = wp_site_url.rstrip("/")
-        self._auth_header: str = f"Basic {encoded}"
+        # Strip spaces from Application Password
+        self._wp_username = wp_username
+        self._wp_app_password = wp_app_password.replace(" ", "")
+        
+        # Ensure trailing slash for consistent relative URL resolution
+        self._base_url: str = wp_site_url.rstrip("/") + "/"
+        
         self._configured: bool = bool(
             wp_site_url
             and wp_username
@@ -136,6 +118,62 @@ class WordPressPublisher:
             wp_site=self._base_url,
             wp_user=wp_username,
         )
+
+    async def get_site_info(self) -> dict:
+        """
+        Fetch the current user info from the WordPress REST API.
+        """
+        if not self._configured:
+            raise WordPressPublishError("WordPress is not configured.")
+
+        # Using auth tuple lets httpx handle the Basic Auth encoding safely
+        async with httpx.AsyncClient(
+            base_url=self._base_url,
+            auth=(self._wp_username, self._wp_app_password),
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                "Accept": "application/json",
+            },
+            timeout=_CONNECT_TIMEOUT,
+            follow_redirects=True,
+            verify=False,
+        ) as client:
+            try:
+                response = await client.get("wp-json/wp/v2/users/me")
+                
+                # Detect common Anti-Bot / JS challenges
+                if "aes.js" in response.text or "toNumbers" in response.text:
+                    raise WordPressPublishError(
+                        "Connection blocked by a JavaScript security challenge (Anti-Bot). "
+                        "This usually happens on free hosting (like InfinityFree) or sites with aggressive firewalls. "
+                        "You must whitelist the REST API (/wp-json/*) or switch to a standard host that allows API access."
+                    )
+
+                # Check for empty response
+                if not response.text:
+                    raise WordPressPublishError(
+                        f"WordPress returned an empty response (HTTP {response.status_code}). "
+                        "Please verify that the WP REST API is enabled on your site."
+                    )
+
+                self._handle_auth_errors(response, context="credential verification")
+                
+                if response.status_code != 200:
+                    raise WordPressPublishError(
+                        f"WP site check returned HTTP {response.status_code}. "
+                        f"Response: {response.text[:200]}"
+                    )
+                
+                try:
+                    return response.json()
+                except json.JSONDecodeError:
+                    raise WordPressPublishError(
+                        f"WordPress returned a non-JSON response (HTTP {response.status_code}). "
+                        f"First 100 chars: {response.text[:100]!r}. "
+                        "This usually means the URL is wrong or a security plugin is blocking the request."
+                    )
+            except httpx.RequestError as exc:
+                raise WordPressPublishError(f"Network error connecting to {self._base_url}: {exc}")
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -155,50 +193,24 @@ class WordPressPublisher:
     ) -> dict:
         """
         Upload an optional featured image and create a new WordPress post.
-
-        Args:
-            title: Plain-text article title (maps to WP post title).
-            html_content: Sanitized HTML body (maps to WP post content).
-            image_bytes: Raw bytes of the featured image (PNG/JPEG). If None,
-                         the post is created without a featured image.
-            image_filename: Filename to use when uploading to WP Media Library.
-            image_alt: Alt text for the featured image.
-            slug: Custom WP post slug. Derived from title if not provided.
-            meta_description: Used to set the Yoast / RankMath SEO excerpt field.
-            tags: List of existing WP tag IDs to attach.
-            categories: List of existing WP category IDs. Defaults to [1]
-                        (Uncategorized) if not provided.
-            post_status: "publish", "draft", or "pending". Defaults to "publish".
-
-        Returns:
-            Dict with:
-              - ``wp_post_id``  (int) — WordPress post database ID
-              - ``wp_post_url`` (str) — Public permalink of the new post
-
-        Raises:
-            WordPressAuthError: Invalid credentials (401/403) — non-retryable.
-            WordPressMediaUploadError: Image upload failed.
-            WordPressPostError: Post creation failed.
-            WordPressPublishError: Any other WP API error.
         """
         if not self._configured:
-            raise WordPressPublishError(
-                "WordPress is not configured. Set WP_SITE_URL, WP_USERNAME, "
-                "and WP_APP_PASSWORD in your .env file."
-            )
+            raise WordPressPublishError("WordPress is not configured.")
 
         timeout = httpx.Timeout(connect=_CONNECT_TIMEOUT, read=_READ_TIMEOUT,
                                 write=_READ_TIMEOUT, pool=5.0)
 
         async with httpx.AsyncClient(
             base_url=self._base_url,
+            auth=(self._wp_username, self._wp_app_password),
             headers={
-                "Authorization": self._auth_header,
                 "User-Agent": "ContentAutomationEngine/1.0 (Python/httpx)",
             },
             timeout=timeout,
             follow_redirects=True,
+            verify=False,
         ) as client:
+            self._logger.info("wordpress.publish.request_start")
 
             # ── Step 1: Upload featured image (optional) ──────────────────────
             featured_media_id: int | None = None

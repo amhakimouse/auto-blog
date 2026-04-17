@@ -10,17 +10,17 @@
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| POST | `/auth/register` | ❌ | Create user account |
+| POST | `/auth/signup` | ❌ | Create user account |
 | POST | `/auth/login` | ❌ | Get JWT access token |
 | GET | `/auth/me` | ✅ | Get current user profile |
 
-**Register payload:**
+**Signup payload:**
 ```json
-{ "email": "user@example.com", "password": "secret" }
+{ "email": "user@example.com", "password": "secret", "full_name": "Optional" }
 ```
 **Login response:**
 ```json
-{ "access_token": "...", "token_type": "bearer" }
+{ "access_token": "...", "token_type": "bearer", "user": { "id": "uuid", "email": "...", "plan": "free", "credits": 10 } }
 ```
 
 ---

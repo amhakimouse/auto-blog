@@ -34,8 +34,9 @@ export function IntegrationsPage() {
       addToast('success', 'Connection successful!');
       queryClient.invalidateQueries({ queryKey: ['integrations'] });
     },
-    onError: () => {
-      addToast('error', 'Connection failed. Please check your credentials.');
+    onError: (err: any) => {
+      const message = err.response?.data?.detail || 'Connection failed. Please check your credentials.';
+      addToast('error', message);
     },
   });
 
@@ -73,7 +74,7 @@ export function IntegrationsPage() {
               </div>
 
               <div className="text-sm text-gray-600 dark:text-gray-400 mb-4">
-                <p>Username: {integration.username}</p>
+                <p>Username: {integration.wp_username}</p>
                 <p>Added: {format(new Date(integration.created_at), 'MMM d, yyyy')}</p>
               </div>
 
@@ -150,7 +151,7 @@ interface IntegrationModalProps {
 function IntegrationModal({ isOpen, onClose, integration }: IntegrationModalProps) {
   const [siteName, setSiteName] = useState(integration?.site_name || '');
   const [wpUrl, setWpUrl] = useState(integration?.wp_url || '');
-  const [username, setUsername] = useState(integration?.username || '');
+  const [wpUsername, setWpUsername] = useState(integration?.wp_username || '');
   const [wpPassword, setWpPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
@@ -169,15 +170,15 @@ function IntegrationModal({ isOpen, onClose, integration }: IntegrationModalProp
         await integrations.update(String(integration.id), {
           site_name: siteName,
           wp_url: wpUrl,
-          username,
-          wp_password: wpPassword || integration.wp_password || '',
+          wp_username: wpUsername,
+          wp_password: wpPassword || '', // Backend handles encryption
         });
         addToast('success', 'Integration updated');
       } else {
         await integrations.create({
           site_name: siteName,
           wp_url: wpUrl,
-          username,
+          wp_username: wpUsername,
           wp_password: wpPassword,
         });
         addToast('success', 'Integration created');
@@ -186,7 +187,7 @@ function IntegrationModal({ isOpen, onClose, integration }: IntegrationModalProp
       onClose();
       setSiteName('');
       setWpUrl('');
-      setUsername('');
+      setWpUsername('');
       setWpPassword('');
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Failed to save integration');
@@ -222,8 +223,8 @@ function IntegrationModal({ isOpen, onClose, integration }: IntegrationModalProp
 
         <Input
           label="Username"
-          value={username}
-          onChange={(e) => setUsername(e.target.value)}
+          value={wpUsername}
+          onChange={(e) => setWpUsername(e.target.value)}
           placeholder="admin"
           required
         />

@@ -761,12 +761,22 @@ def run(self) -> dict:
 
 ## 8. AI Services
 
+### `app/ai/gemini_rest_client.py` — Vertex AI REST Client
+
+**What it does:**  
+Provides a direct HTTP-based client for Vertex AI Gemini, bypassing the official SDK for better control, performance, and reduced dependency bloat.
+
+**Key features:**
+- OAuth2 authentication with service account tokens.
+- Supports streaming and non-streaming responses.
+- Handles API errors and blocked/empty responses.
+
+---
+
 ### `app/ai/gemini_writer.py` — Gemini AI Writer
 
 **What it does:**  
-All Gemini/Vertex AI interactions for writing articles.
-
-**Functions:**
+All Gemini/Vertex AI interactions for writing articles. Can use either the official SDK or the custom REST client based on `settings.gemini_use_rest_api`.
 
 1. **rewrite_article_for_seo** — Workflow 2 rewriting
 ```python

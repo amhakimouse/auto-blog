@@ -17,11 +17,11 @@ They are always called from a **Celery task** (sync context), never from FastAPI
 | Stage | Method | Progress | Description |
 |---|---|---|---|
 | 1 | `_search()` | 5→20% | DuckDuckGo → top-5 competitor URLs |
-| 2 | `_scrape_outline()` | 22→35% | async httpx + BeautifulSoup → H1/H2/H3 + first `<p>` per heading (~500-900 chars/article) |
+| 2 | `_scrape_outline()` | 22→35% | trafilatura extraction → H1/H2/H3 + first `<p>` per heading (~500-900 chars/article) |
 | 3 | `_analyze_gaps()` | 37→50% | Gemini: gap analysis JSON from outlines |
 | 4 | `_generate_outline()` | 52→65% | Gemini: structured article outline (5-10 sections) |
 | 5 | `_write_article()` | 67→85% | Gemini per-section HTML — one API call per section |
-| 6 | `_generate_images()` | 87→90% | Imagen: featured (16:9) + N content images |
+| 6 | `_generate_images()` | 87→90% | Imagen: featured (16:9) + N content images via `imagen_client.py` |
 | 7 | `_finalize()` | 91→92% | bleach sanitise → upsert Article → (no auto-publish) |
 
 ### Key details

@@ -153,6 +153,28 @@ export function JobDetailPage() {
           </div>
         </dl>
 
+        {job.meta?.seo_title && (
+          <div className="mt-6 pt-6 border-t border-gray-200 dark:border-dark-border">
+            <h4 className="text-sm font-medium text-gray-900 dark:text-white mb-4">SEO Analysis & Metadata</h4>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div className="space-y-1">
+                <span className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wider">SEO Title</span>
+                <p className="text-sm text-gray-900 dark:text-white font-medium">{job.meta.seo_title}</p>
+              </div>
+              <div className="space-y-1">
+                <span className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wider">Target Keyword</span>
+                <p className="text-sm text-gray-900 dark:text-white font-medium">
+                  <Badge variant="secondary">{job.meta.target_keyword}</Badge>
+                </p>
+              </div>
+              <div className="md:col-span-2 space-y-1">
+                <span className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wider">SEO Description</span>
+                <p className="text-sm text-gray-700 dark:text-gray-300 leading-relaxed">{job.meta.seo_description}</p>
+              </div>
+            </div>
+          </div>
+        )}
+
         {job.meta?.extracted_source && (
           <div className="mt-6 pt-6 border-t border-gray-200 dark:border-dark-border">
             <h4 className="text-sm font-medium text-gray-900 dark:text-white mb-2">Extracted Source Content</h4>

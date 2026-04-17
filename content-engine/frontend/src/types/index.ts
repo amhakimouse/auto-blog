@@ -69,8 +69,8 @@ export interface Integration {
   id: string;
   site_name: string;
   wp_url: string;
-  username: string;
-  wp_password: string;
+  wp_username: string;
+  wp_password?: string;
   is_connected: boolean;
   created_at: string;
   updated_at: string;
@@ -94,7 +94,7 @@ export interface RelatedArticle {
 export interface CreateIntegrationRequest {
   site_name: string;
   wp_url: string;
-  username: string;
+  wp_username: string;
   wp_password: string;
 }
 

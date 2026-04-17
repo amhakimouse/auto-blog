@@ -124,23 +124,18 @@ Never `import os; os.environ.get(...)` in application code.
 
 ## HTML Safety
 
-All HTML that comes from Gemini must be run through `bleach.clean()` before storage:
-```python
-import bleach
-clean_html = bleach.clean(
-    dirty_html,
-    tags=_ALLOWED_TAGS,
-    attributes=_ALLOWED_ATTRIBUTES,
-    strip=True,
-    strip_comments=True,
-)
-```
-The `_ALLOWED_TAGS` / `_ALLOWED_ATTRIBUTES` allowlists are duplicated in:
-- `ai/gemini_writer.py`
-- `pipelines/keyword_pipeline.py`
-- `pipelines/reference_pipeline.py`
+All HTML that comes from Gemini must be run through `bleach.clean()` before storage. The `_ALLOWED_TAGS` / `_ALLOWED_ATTRIBUTES` allowlists are currently duplicated in `ai/gemini_writer.py`, `pipelines/keyword_pipeline.py`, `pipelines/reference_pipeline.py`, and `api/v1/articles.py`.
 
 > **TODO:** Consolidate these into a single `utils/html.py` module.
+
+---
+
+## Scraping & Evasion
+
+- Use **Trafilatura** for main content extraction (it handles boilerplate/nav removal best).
+- Use **FlareSolverr** (`settings.flaresolverr_url`) to bypass Cloudflare protection where necessary.
+- Respect `settings.scrape_timeout_seconds` and `settings.max_scrape_urls` to avoid hung tasks.
+- Use `scrape_proxy_url` if defined to rotate IPs and avoid rate limits on search engines.
 
 ---
 

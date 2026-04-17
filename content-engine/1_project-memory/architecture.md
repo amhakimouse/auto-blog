@@ -37,10 +37,11 @@ User / Frontend
   └─────────────────────────────┘
 
   External services called by worker:
-  ├── Vertex AI / Gemini  (text generation)
+  ├── Vertex AI / Gemini  (text generation — via SDK or direct REST API)
   ├── Vertex AI / Imagen  (image generation)
   ├── DuckDuckGo HTML     (competitor search, free)
   ├── httpx + trafilatura (article scraping)
+  ├── FlareSolverr        (Cloudflare bypass for scraping)
   └── WordPress REST API  (publish)
 ```
 
@@ -54,12 +55,13 @@ User / Frontend
 | Task queue | Celery 5 + Redis | battle-tested, already in stack |
 | DB ORM | SQLAlchemy 2 async | typed `Mapped[]`, async session |
 | DB driver | asyncpg (API) / psycopg2 (worker) | Celery runs in threads — no async |
-| AI text | Vertex AI Gemini 1.5 Pro | best quality, GCP native |
+| AI text | Vertex AI Gemini 1.5 Pro | best quality, via REST or SDK |
 | AI image | Vertex AI Imagen | matches Gemini project |
 | HTML safety | bleach | allowlist-based XSS sanitiser |
 | Logging | structlog | structured JSON, bound context |
 | Auth | JWT (python-jose) + bcrypt | stateless tokens |
 | Rate limiting | slowapi | per-user key func |
+| Scraping | Trafilatura + FlareSolverr | best-in-class extraction + bypass |
 
 ---
 

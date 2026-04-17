@@ -313,7 +313,7 @@ function CreateJobModal({ isOpen, onClose, integrations }: CreateJobModalProps) 
               <div>
                 <label className="label">Content Images</label>
                 <div className="flex gap-2">
-                  {[1, 2, 3, 4, 5].map((num) => (
+                  {[0, 1, 2, 3, 4, 5].map((num) => (
                     <button
                       key={num}
                       type="button"
@@ -393,6 +393,33 @@ function CreateJobModal({ isOpen, onClose, integrations }: CreateJobModalProps) 
                   { value: '', label: 'Select brand...' },
                   ...integrations.map((i: Integration) => ({ value: i.id, label: i.site_name })),
                 ]}
+              />
+
+              <div>
+                <label className="label">Content Images</label>
+                <div className="flex gap-2">
+                  {[0, 1, 2, 3, 4, 5].map((num) => (
+                    <button
+                      key={num}
+                      type="button"
+                      onClick={() => setContentImageCount(num)}
+                      className={clsx(
+                        'w-10 h-10 rounded-lg font-medium text-sm transition-colors',
+                        contentImageCount === num
+                          ? 'bg-primary-500 text-white'
+                          : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600'
+                      )}
+                    >
+                      {num}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <Toggle
+                checked={includeFeaturedImage}
+                onChange={setIncludeFeaturedImage}
+                label="Include Featured Image"
               />
             </>
           )}

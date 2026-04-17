@@ -114,8 +114,8 @@ else:
 # ── System prompt (Workflow 2 rewrite) ────────────────────────────────────────
 _SYSTEM_PROMPT = """\
 You are an Expert SEO Copywriter with 15 years of experience writing high-ranking
-web content. Your task is to transform a raw Markdown article into a polished,
-search-engine-optimised HTML article.
+web content. Your task is to transform a raw article into a polished,
+search-engine-optimised Markdown article and provide comprehensive SEO metadata.
 
 WRITING GUIDELINES:
 - Improve the structure with clear, keyword-rich headings (H1, H2, H3).
@@ -126,17 +126,33 @@ WRITING GUIDELINES:
 - Ensure the article follows the E-E-A-T principle (Experience, Expertise,
   Authoritativeness, Trustworthiness).
 
+IMAGE PROMPT GUIDELINES:
+- Generate up to 5 descriptive image prompts for AI generation.
+- Prompts should be detailed, specifying style (e.g., "photorealistic", "digital art"),
+  composition, and lighting.
+- Each prompt should relate directly to a section of the article.
+- **CRITICAL**: You MUST inject image tags into the "html_content" where they should appear.
+- Use this format for injection: `<img src="IMAGE_PLACEHOLDER_1">` for the first image, `<img src="IMAGE_PLACEHOLDER_2">` for the second, and so on.
+- The featured image (IMAGE_PLACEHOLDER_1) should ideally be at the very top.
+- Spread the other placeholders (2-5) naturally throughout the article body.
+
 OUTPUT FORMAT — YOU MUST REPLY WITH A SINGLE, VALID JSON OBJECT AND NOTHING ELSE:
 {
-  "title": "<Compelling, keyword-focused article title as plain text — no HTML>",
-  "html_content": "<Full article body as clean, semantic HTML using only: \
-h1, h2, h3, p, ul, ol, li, strong, em, blockquote, table, thead, tbody, tr, th, td>"
+  "title": "<Compelling, keyword-focused article title>",
+  "html_content": "<Full article body as clean, semantic HTML>",
+  "target_keyword": "<Primary SEO focus keyword>",
+  "slug": "<URL-friendly slug generated from the title>",
+  "seo_title": "<Optimised SEO meta title (max 60 chars)>",
+  "seo_description": "<Compelling SEO meta description (max 160 chars)>",
+  "image_1_prompt": "<Detailed prompt for featured image>",
+  "image_2_prompt": "<Detailed prompt for content image 1>",
+  "image_3_prompt": "<Detailed prompt for content image 2>",
+  "image_4_prompt": "<Detailed prompt for content image 3>",
+  "image_5_prompt": "<Detailed prompt for content image 4>"
 }
 
 CRITICAL RULES:
-- Do NOT include markdown in the output — only clean HTML inside html_content.
-- Do NOT include <html>, <head>, <body>, or <style> wrapper tags.
-- Do NOT include any JavaScript or inline style attributes.
+- The content in "html_content" must be VALID semantic HTML.
 - The JSON must be parseable by Python's json.loads() — no trailing commas,
   no comments, properly escaped strings.
 - Reply with the JSON object only — no preamble, no explanation.
@@ -150,8 +166,24 @@ _REWRITE_SCHEMA = {
     "properties": {
         "title": {"type": "STRING"},
         "html_content": {"type": "STRING"},
+        "target_keyword": {"type": "STRING"},
+        "slug": {"type": "STRING"},
+        "seo_title": {"type": "STRING"},
+        "seo_description": {"type": "STRING"},
+        "image_1_prompt": {"type": "STRING"},
+        "image_2_prompt": {"type": "STRING"},
+        "image_3_prompt": {"type": "STRING"},
+        "image_4_prompt": {"type": "STRING"},
+        "image_5_prompt": {"type": "STRING"},
     },
-    "required": ["title", "html_content"],
+    "required": [
+        "title",
+        "html_content",
+        "target_keyword",
+        "slug",
+        "seo_title",
+        "seo_description",
+    ],
 }
 
 _GAP_ANALYSIS_SCHEMA = {
@@ -213,17 +245,18 @@ _OUTLINE_SCHEMA = {
 
 def rewrite_article_for_seo(markdown_content: str) -> dict:
     """
-    Rewrite *markdown_content* as an SEO-optimised HTML article using Gemini.
+    Rewrite *markdown_content* as an SEO-optimised Markdown article and metadata using Gemini.
     """
     logger = log.bind(model=settings.vertex_ai_model, input_chars=len(markdown_content))
     logger.info("gemini_writer.rewrite.start")
 
     user_message = (
-        "Please rewrite the following Markdown article as SEO-optimised HTML, "
+        "Please transform the following article into a polished, SEO-optimised "
+        "Markdown article and provide comprehensive metadata as JSON, "
         "following all the guidelines in your system prompt.\n\n"
-        "--- ARTICLE MARKDOWN START ---\n"
+        "--- ARTICLE START ---\n"
         f"{markdown_content}\n"
-        "--- ARTICLE MARKDOWN END ---"
+        "--- ARTICLE END ---"
     )
 
     try:
@@ -261,26 +294,25 @@ def rewrite_article_for_seo(markdown_content: str) -> dict:
 
     _validate_keys(parsed)
 
-    dirty_html: str = parsed["html_content"]
-    clean_html: str = bleach.clean(
-        dirty_html,
-        tags=_ALLOWED_TAGS,
-        attributes=_ALLOWED_ATTRIBUTES,
-        strip=True,
-        strip_comments=True,
-    )
-
+    # Note: We now return the raw markdown_content from Gemini as requested
     title: str = parsed["title"].strip()
-    word_count: int = len(re.findall(r"\w+", clean_html))
-    slug: str = _slugify(title)
-
+    
+    # Minimal validation/cleanup of the dictionary
     result = {
         "title": title,
-        "html_content": clean_html,
-        "word_count": word_count,
-        "slug": slug,
+        "markdown_content": parsed["markdown_content"],
+        "target_keyword": parsed.get("target_keyword", ""),
+        "slug": parsed.get("slug") or _slugify(title),
+        "seo_title": parsed.get("seo_title", ""),
+        "seo_description": parsed.get("seo_description", ""),
+        "image_1_prompt": parsed.get("image_1_prompt", ""),
+        "image_2_prompt": parsed.get("image_2_prompt", ""),
+        "image_3_prompt": parsed.get("image_3_prompt", ""),
+        "image_4_prompt": parsed.get("image_4_prompt", ""),
+        "image_5_prompt": parsed.get("image_5_prompt", ""),
     }
-    logger.info("gemini_writer.rewrite.success", title=title, word_count=word_count)
+    
+    logger.info("gemini_writer.rewrite.success", title=title)
     return result
 
 
@@ -335,7 +367,7 @@ def _parse_json_response(raw_text: str, logger: structlog.BoundLogger) -> dict:
 
 def _validate_keys(parsed: dict) -> None:
     """Ensure required keys are present."""
-    required = ("title", "html_content")
+    required = ("title", "markdown_content")
     for key in required:
         if key not in parsed:
             raise GeminiResponseParseError(f"Missing key: '{key}'")

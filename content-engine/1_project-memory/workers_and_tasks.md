@@ -5,7 +5,7 @@
 **Broker:** Redis at `CELERY_BROKER_URL`  
 **Result backend:** Redis at `CELERY_RESULT_BACKEND`  
 **Queue:** `default` (single queue for all tasks)  
-**Sync DB session:** Created per-worker from `_SyncDB_URL` (psycopg2 driver, not asyncpg)
+**Sync DB session:** Created per-worker from `_SyncDB_URL` (psycopg2 driver, not asyncpg). Uses `sessionmaker` with a dedicated engine (`_sync_engine`) in `tasks.py`.
 
 ---
 

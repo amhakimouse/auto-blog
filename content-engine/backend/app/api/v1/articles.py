@@ -280,20 +280,14 @@ async def publish_article(
             break
 
     try:
-        # asyncio.run() inside an async endpoint would deadlock — use run_in_executor
-        loop = asyncio.get_event_loop()
-        publish_result: dict = await loop.run_in_executor(
-            None,
-            lambda: asyncio.run(
-                publisher.publish(
-                    title=article.title,
-                    html_content=clean_html,
-                    image_bytes=image_bytes,
-                    image_alt=image_alt,
-                    slug=article.slug,
-                    meta_description=article.meta_description,
-                )
-            ),
+        # Directly await the async publish method
+        publish_result: dict = await publisher.publish(
+            title=article.title,
+            html_content=clean_html,
+            image_bytes=image_bytes,
+            image_alt=image_alt,
+            slug=article.slug,
+            meta_description=article.meta_description,
         )
     except WordPressAuthError as exc:
         log.error("articles.publish.auth_error", article_id=str(article_id), error=str(exc))
