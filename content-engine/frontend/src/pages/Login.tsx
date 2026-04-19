@@ -2,8 +2,7 @@ import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '@/hooks/useAuth';
 import { auth } from '@/lib/api';
-import { Button, Input } from '@/components/ui';
-import { useToast } from '@/components/ui/Toast';
+import { Button, Input, useToast } from '@/components/ui';
 
 export function LoginPage() {
   const [email, setEmail] = useState('');

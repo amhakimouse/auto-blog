@@ -177,6 +177,35 @@ class WordPressPublisher:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
+    async def get_site_info(self) -> dict:
+        """
+        Attempt to fetch site information from the WP REST API.
+        Used to verify credentials and URL.
+        """
+        async with httpx.AsyncClient(
+            base_url=self._base_url,
+            headers={
+                "Authorization": self._auth_header,
+                "User-Agent": "ContentAutomationEngine/1.0",
+            },
+            timeout=10.0,
+            follow_redirects=True,
+        ) as client:
+            try:
+                # Fetch root API info which usually requires some level of auth or is public but 
+                # we want to verify our auth works against a known endpoint like /wp/v2/users/me
+                response = await client.get(f"{_WP_API_BASE}/users/me")
+                self._handle_auth_errors(response, context="site verification")
+                
+                if response.status_code != 200:
+                    raise WordPressPublishError(
+                        f"WordPress site verification failed: HTTP {response.status_code}"
+                    )
+                
+                return response.json()
+            except httpx.RequestError as exc:
+                raise WordPressPublishError(f"Connection error: {str(exc)}")
+
     async def publish(
         self,
         title: str,

@@ -22,7 +22,10 @@ class Settings(BaseSettings):
 
     # ── App ──────────────────────────────────────────────────────────────────
     app_env: Literal["development", "production"] = "development"
+
+    # ── JWT Auth ──────────────────────────────────────────────────────────────
     secret_key: str = Field(..., min_length=32)
+    access_token_expire_minutes: int = 60 * 24 * 7  # 7 days
     debug: bool = False
     app_name: str = "Content Automation Engine"
     api_v1_prefix: str = "/api/v1"

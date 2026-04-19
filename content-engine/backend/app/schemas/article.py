@@ -58,3 +58,7 @@ class ArticlePublishRequest(BaseModel):
             "via Celery Beat. If null, publishes immediately."
         ),
     )
+    integration_id: uuid.UUID | None = Field(
+        default=None,
+        description="Optional: Assign or update the Brand Profile (Integration) for this article before publishing.",
+    )

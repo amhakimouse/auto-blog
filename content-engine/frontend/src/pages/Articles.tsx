@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
-import { articles } from '@/lib/api';
+import { articles, integrations } from '@/lib/api';
 import { Card, Button, Input, Select, Badge, Modal, Loading, useToast } from '@/components/ui';
 import { Search, Eye, Edit, Trash2, Send, ExternalLink } from 'lucide-react';
 import { format } from 'date-fns';
@@ -18,7 +18,12 @@ export function ArticlesPage() {
 
   const { data: articlesData, isLoading } = useQuery({
     queryKey: ['articles', page, statusFilter],
-    queryFn: () => articles.list(20, (page - 1) * 20, statusFilter || undefined),
+    queryFn: () => articles.list({ limit: 20, offset: (page - 1) * 20, status: statusFilter || undefined }),
+  });
+
+  const { data: integrationsData } = useQuery({
+    queryKey: ['integrations'],
+    queryFn: integrations.list,
   });
 
   const deleteMutation = useMutation({
@@ -32,7 +37,9 @@ export function ArticlesPage() {
     },
   });
 
-  const articleList = Array.isArray(articlesData) ? articlesData : (articlesData?.items || []);
+  const articleList = Array.isArray(articlesData) 
+    ? articlesData 
+    : (Array.isArray(articlesData?.items) ? articlesData.items : []);
 
   const filteredArticles = articleList.filter((article: Article) =>
     article.title.toLowerCase().includes(searchQuery.toLowerCase())
@@ -191,7 +198,7 @@ export function ArticlesPage() {
         </div>
       )}
 
-      {selectedArticle && (
+      {isPublishModalOpen && selectedArticle && (
         <PublishModal
           isOpen={isPublishModalOpen}
           onClose={() => {
@@ -199,6 +206,7 @@ export function ArticlesPage() {
             setSelectedArticle(null);
           }}
           article={selectedArticle}
+          integrationsList={integrationsData || []}
         />
       )}
     </div>
@@ -209,11 +217,13 @@ interface PublishModalProps {
   isOpen: boolean;
   onClose: () => void;
   article: Article;
+  integrationsList: Integration[];
 }
 
-function PublishModal({ isOpen, onClose, article }: PublishModalProps) {
+function PublishModal({ isOpen, onClose, article, integrationsList }: PublishModalProps) {
   const [publishType, setPublishType] = useState<'immediate' | 'scheduled'>('immediate');
   const [scheduledAt, setScheduledAt] = useState('');
+  const [integrationId, setIntegrationId] = useState(article.integration_id || '');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
   const queryClient = useQueryClient();
@@ -224,12 +234,19 @@ function PublishModal({ isOpen, onClose, article }: PublishModalProps) {
     setIsLoading(true);
     setError('');
 
+    if (!integrationId) {
+      setError('Please select a Brand Profile (Integration)');
+      setIsLoading(false);
+      return;
+    }
+
     try {
       const articleData = await articles.get(article.id);
       await articles.publish(
         article.id,
         articleData.html_content,
-        publishType === 'scheduled' ? scheduledAt : undefined
+        publishType === 'scheduled' ? scheduledAt : undefined,
+        integrationId
       );
       addToast('success', publishType === 'immediate' ? 'Article published!' : 'Article scheduled!');
       queryClient.invalidateQueries({ queryKey: ['articles'] });
@@ -256,6 +273,18 @@ function PublishModal({ isOpen, onClose, article }: PublishModalProps) {
             {article.word_count} words
           </p>
         </div>
+
+        <Select
+          label="Brand Profile"
+          value={integrationId}
+          onChange={(e) => setIntegrationId(e.target.value)}
+          options={[
+            { value: '', label: 'Select brand...' },
+            ...integrationsList.map((i: Integration) => ({ value: i.id, label: i.site_name })),
+          ]}
+          required
+          helperText="Select which WordPress site this article will be published to"
+        />
 
         <div>
           <label className="label">Publish Type</label>

@@ -8,7 +8,7 @@ Endpoints:
 """
 
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -18,6 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_current_active_user
+from app.config import settings
 from app.database import get_db
 from app.models.user import User
 from app.security.auth import create_access_token, get_password_hash, verify_password
@@ -37,6 +38,7 @@ class UserResponse(BaseModel):
     full_name: str | None
     plan: str
     credits: int
+    created_at: datetime
 
     model_config = {"from_attributes": True}
 
@@ -48,6 +50,12 @@ class UserResponse(BaseModel):
 class Token(BaseModel):
     access_token: str
     token_type: str
+
+
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: str
+    user: UserResponse
 
 
 class SignupResponse(BaseModel):
@@ -77,24 +85,18 @@ async def signup(user_in: UserCreate, db: AsyncSession = Depends(get_db)):
     await db.commit()
     await db.refresh(user)
 
-    access_token_expires = timedelta(minutes=60)
+    access_token_expires = timedelta(minutes=settings.access_token_expire_minutes)
     access_token = create_access_token(
         data={"sub": str(user.id)}, expires_delta=access_token_expires
     )
     return {
         "access_token": access_token,
         "token_type": "bearer",
-        "user": UserResponse(
-            id=str(user.id),
-            email=user.email,
-            full_name=user.full_name,
-            plan=user.plan,
-            credits=user.credits,
-        ),
+        "user": user,
     }
 
 
-@router.post("/login", response_model=Token)
+@router.post("/login", response_model=LoginResponse)
 async def login(
     form_data: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_db)
 ):
@@ -108,11 +110,15 @@ async def login(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    access_token_expires = timedelta(minutes=60)
+    access_token_expires = timedelta(minutes=settings.access_token_expire_minutes)
     access_token = create_access_token(
         data={"sub": str(user.id)}, expires_delta=access_token_expires
     )
-    return {"access_token": access_token, "token_type": "bearer"}
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": user,
+    }
 
 
 # ── GET /auth/me ──────────────────────────────────────────────────────────────
@@ -125,16 +131,10 @@ async def login(
 )
 async def get_current_user_profile(
     user: User = Depends(get_current_active_user),
-) -> UserResponse:
+) -> User:
     """
     Returns the authenticated user's id, email, full_name, subscription plan,
     and remaining credit balance. Useful for the frontend to hydrate user state
     on page load or app refresh without forcing a new login.
     """
-    return UserResponse(
-        id=str(user.id),
-        email=user.email,
-        full_name=user.full_name,
-        plan=user.plan,
-        credits=user.credits,
-    )
+    return user

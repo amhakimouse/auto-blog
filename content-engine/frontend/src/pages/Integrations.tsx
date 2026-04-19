@@ -154,43 +154,56 @@ function IntegrationModal({ isOpen, onClose, integration }: IntegrationModalProp
   const [wpUsername, setWpUsername] = useState(integration?.wp_username || '');
   const [wpPassword, setWpPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState('');
+  const [error, setError] = useState<string | null>(null);
   const queryClient = useQueryClient();
   const { addToast } = useToast();
 
   const isEditing = !!integration;
 
+  const getErrorMessage = (err: any): string => {
+    const detail = err.response?.data?.detail;
+    if (Array.isArray(detail)) {
+      return detail.map((d: any) => d.msg).join(', ');
+    }
+    if (typeof detail === 'object' && detail !== null) {
+      return detail.msg || JSON.stringify(detail);
+    }
+    return detail || err.message || 'An unexpected error occurred';
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
-    setError('');
+    setError(null);
 
     try {
+      const payload = {
+        site_name: siteName,
+        wp_url: wpUrl,
+        wp_username: wpUsername,
+        wp_password: wpPassword || (isEditing ? undefined : ''),
+      };
+
       if (isEditing) {
-        await integrations.update(String(integration.id), {
-          site_name: siteName,
-          wp_url: wpUrl,
-          wp_username: wpUsername,
-          wp_password: wpPassword || '', // Backend handles encryption
-        });
+        // Remove password if not provided during edit
+        if (!wpPassword) delete (payload as any).wp_password;
+        
+        await integrations.update(String(integration.id), payload);
         addToast('success', 'Integration updated');
       } else {
-        await integrations.create({
-          site_name: siteName,
-          wp_url: wpUrl,
-          wp_username: wpUsername,
-          wp_password: wpPassword,
-        });
+        await integrations.create(payload);
         addToast('success', 'Integration created');
       }
-      queryClient.invalidateQueries({ queryKey: ['integrations'] });
+      
+      await queryClient.invalidateQueries({ queryKey: ['integrations'] });
+      
       onClose();
       setSiteName('');
       setWpUrl('');
       setWpUsername('');
       setWpPassword('');
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to save integration');
+      setError(getErrorMessage(err));
     } finally {
       setIsLoading(false);
     }

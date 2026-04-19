@@ -1,7 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { AuthProvider, useAuth } from '@/hooks/useAuth';
-import { ToastProvider } from '@/components/ui';
+import { ToastProvider, Loading } from '@/components/ui';
 import { AppLayout } from '@/components/Layout';
 import {
   LoginPage,
@@ -29,7 +29,7 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading } = useAuth();
 
   if (isLoading) {
-    return null;
+    return <Loading fullScreen text="Verifying session..." />;
   }
 
   if (!isAuthenticated) {
@@ -43,7 +43,7 @@ function PublicRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading } = useAuth();
 
   if (isLoading) {
-    return null;
+    return <Loading fullScreen text="Initializing..." />;
   }
 
   if (isAuthenticated) {

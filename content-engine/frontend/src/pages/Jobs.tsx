@@ -17,10 +17,7 @@ export function JobsPage() {
 
   const { data: jobsResponse, isLoading } = useQuery({
     queryKey: ['jobs', offset],
-    queryFn: async () => {
-      const response = await jobs.list(20, offset);
-      return (response as any).data || response;
-    },
+    queryFn: () => jobs.list({ limit: 20, offset }),
   });
 
   const { data: integrationsResponse } = useQuery({
@@ -45,10 +42,10 @@ export function JobsPage() {
     },
   });
 
-  const filteredJobs = jobsData?.filter((job: Job) =>
+  const filteredJobs = (Array.isArray(jobsData) ? jobsData : []).filter((job: Job) =>
     (job.input_keyword?.toLowerCase().includes(searchQuery.toLowerCase()) ||
      job.input_url?.toLowerCase().includes(searchQuery.toLowerCase()))
-  ) || [];
+  );
 
   const getWorkflowLabel = (type: string) => {
     if (type === 'keyword_to_article') return 'Keyword';
@@ -149,7 +146,7 @@ export function JobsPage() {
         )}
       </Card>
 
-      {jobsData && jobsData.length > 0 && (
+      {jobsResponse && (Array.isArray(jobsResponse) ? jobsResponse.length > 0 : (jobsResponse as any).total > 0) && (
         <div className="flex items-center justify-center gap-2">
           <Button
             variant="secondary"
@@ -160,12 +157,12 @@ export function JobsPage() {
             Previous
           </Button>
           <span className="text-sm text-gray-600 dark:text-gray-400">
-            Showing {offset + 1} - {offset + filteredJobs.length}
+            Page {Math.floor(offset / 20) + 1}
           </span>
           <Button
             variant="secondary"
             size="sm"
-            disabled={filteredJobs.length < 20}
+            disabled={Array.isArray(jobsResponse) ? jobsResponse.length < 20 : true}
             onClick={() => setOffset((p) => p + 20)}
           >
             Next
@@ -230,6 +227,12 @@ function CreateJobModal({ isOpen, onClose, integrationsList }: CreateJobModalPro
       }
       if (activeTab === 'reference' && !referenceUrl.trim()) {
         setError('Reference URL is required');
+        setIsLoading(false);
+        return;
+      }
+
+      if (!integrationId) {
+        setError('Please select a Brand Profile');
         setIsLoading(false);
         return;
       }
@@ -310,13 +313,15 @@ function CreateJobModal({ isOpen, onClose, integrationsList }: CreateJobModalPro
               />
 
               <Select
-                label="Brand Profile (optional)"
+                label="Brand Profile"
                 value={integrationId}
                 onChange={(e) => setIntegrationId(e.target.value)}
                 options={[
                   { value: '', label: 'Select brand...' },
                   ...integrationsList.map((i: Integration) => ({ value: i.id, label: i.site_name })),
                 ]}
+                required
+                helperText="Select which WordPress site this article will be published to"
               />
 
               <div>
@@ -395,13 +400,15 @@ function CreateJobModal({ isOpen, onClose, integrationsList }: CreateJobModalPro
               />
 
               <Select
-                label="Brand Profile (optional)"
+                label="Brand Profile"
                 value={integrationId}
                 onChange={(e) => setIntegrationId(e.target.value)}
                 options={[
                   { value: '', label: 'Select brand...' },
                   ...integrationsList.map((i: Integration) => ({ value: i.id, label: i.site_name })),
                 ]}
+                required
+                helperText="Select which WordPress site this article will be published to"
               />
 
               <div>

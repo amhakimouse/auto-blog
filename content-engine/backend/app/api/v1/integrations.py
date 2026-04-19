@@ -24,7 +24,7 @@ Design:
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -139,7 +139,7 @@ class IntegrationRead(BaseModel):
             "site_name": integration.site_name,
             "wp_url": integration.wp_url,
             "wp_username": integration.wp_username,
-            "is_connected": False,
+            "is_connected": integration.is_connected,
             "brand_voice_prompt": integration.brand_voice_prompt,
             "cached_link_count": len(integration.existing_post_links or {}),
             "created_at": integration.created_at,
@@ -197,6 +197,7 @@ async def create_integration(
         wp_username=payload.wp_username,
         brand_voice_prompt=payload.brand_voice_prompt,
         existing_post_links={},
+        is_connected=False,
     )
     # Use the model's encrypted setter
     integration.wp_password = payload.wp_password
@@ -280,6 +281,7 @@ async def update_integration(
     integration.wp_username = payload.wp_username
     integration.wp_password = payload.wp_password  # encrypts via setter
     integration.brand_voice_prompt = payload.brand_voice_prompt
+    integration.is_connected = False  # reset connection status on update
 
     await db.commit()
     await db.refresh(integration)
@@ -316,6 +318,10 @@ async def patch_integration(
         integration.wp_password = payload.wp_password  # encrypts via setter
     if payload.brand_voice_prompt is not None:
         integration.brand_voice_prompt = payload.brand_voice_prompt
+    
+    # If any connection fields changed, reset is_connected
+    if any([payload.wp_url, payload.wp_username, payload.wp_password]):
+        integration.is_connected = False
 
     await db.commit()
     await db.refresh(integration)
@@ -378,11 +384,22 @@ async def test_integration(
             wp_app_password=integration.wp_password,
         )
         await publisher.get_site_info()
+        
+        # Persist success
+        integration.is_connected = True
+        integration.last_tested_at = datetime.now(timezone.utc)
+        await db.commit()
+        
         return {"success": True, "message": "Connection successful"}
     except Exception as e:
         log.warning(
             "integrations.test_failed", integration_id=str(integration_id), error=str(e)
         )
+        # Persist failure
+        integration.is_connected = False
+        integration.last_tested_at = datetime.now(timezone.utc)
+        await db.commit()
+        
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Connection failed: {str(e)}",

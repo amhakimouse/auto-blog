@@ -397,6 +397,16 @@ def sync_wp_links(self, integration_id: str) -> dict:
             return {"error": "Integration not found", "integration_id": integration_id}
 
         import httpx
+        import base64
+
+        # Prepare auth header
+        raw_password = integration.wp_password.replace(" ", "")
+        credentials = f"{integration.wp_username}:{raw_password}"
+        encoded_auth = base64.b64encode(credentials.encode()).decode()
+        headers = {
+            "Authorization": f"Basic {encoded_auth}",
+            "User-Agent": "ContentAutomationEngine/1.0",
+        }
 
         post_links = {}
         page = 1
@@ -414,7 +424,8 @@ def sync_wp_links(self, integration_id: str) -> dict:
                             "_fields": "slug,link",
                             "per_page": per_page,
                             "page": page,
-                        }
+                        },
+                        headers=headers,
                     )
                     response.raise_for_status()
                     posts = response.json()

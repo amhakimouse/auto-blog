@@ -2,7 +2,7 @@ import { useParams, Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { jobs } from '@/lib/api';
 import { Card, Button, Badge, Loading, Progress, useToast } from '@/components/ui';
-import { ArrowLeft, ExternalLink, CheckCircle, RefreshCw } from 'lucide-react';
+import { ArrowLeft, ExternalLink, CheckCircle, FileText } from 'lucide-react';
 import { format } from 'date-fns';
 
 export function JobDetailPage() {
@@ -16,9 +16,13 @@ export function JobDetailPage() {
         const response = await jobs.get(id!);
         return (response as any).data || response;
     },
-    refetchInterval: (data) => {
-        const job = (data as any);
-        return (job && (job.status === 'processing' || job.status === 'pending' || job.status === 'scraping' || job.status === 'analyzing')) ? 3000 : false;
+    refetchInterval: (query) => {
+        const job = (query.state.data as any);
+        if (job && (job.status === 'processing' || job.status === 'pending' || 
+            ['searching', 'scraping', 'analyzing', 'outlining', 'writing'].includes(job.status))) {
+          return 3000;
+        }
+        return false;
     }
   });
 
@@ -59,7 +63,8 @@ export function JobDetailPage() {
     { status: 'completed', label: 'Completed', description: 'Article ready' },
   ];
 
-  const currentStepIndex = timelineSteps.findIndex((s) => s.status === job.status);
+  const currentStepIndex = timelineSteps.findIndex((s) => s.status === job.status || 
+    (job.status !== 'completed' && job.status !== 'failed' && s.status === 'processing'));
   const isFailed = job.status === 'failed';
 
   return (
@@ -95,21 +100,22 @@ export function JobDetailPage() {
         <div className="flex items-start justify-between mb-6">
           <div>
             <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-1">
-              {job.workflow_type === 'keyword_to_article' ? 'Keyword Based' : 'Reference Based'} Article Generation
+              {(job.workflow_type || '').replace(/_/g, ' ')}
             </h2>
-            <p className="text-gray-600 dark:text-gray-400">{job.input_keyword || job.input_url}</p>
+            <p className="text-gray-600 dark:text-gray-400">{job.input_keyword || job.input_url || '-'}</p>
           </div>
           <Badge variant={job.status}>{job.status.replace(/_/g, ' ')}</Badge>
-          </div>
+        </div>
 
-          {/* Progress */}
-          <div className="mb-6">
+        {/* Progress */}
+        <div className="mb-6">
           <div className="flex items-center justify-between mb-2">
-            <span className="text-sm font-medium text-gray-700 dark:text-gray-300">Overall Progress</span>
-            <span className="text-sm text-gray-500">{job.progress_pct}%</span>
+            <span className="text-sm font-medium text-gray-700 dark:text-gray-300">Progress</span>
+            <span className="text-sm text-gray-500">{job.progress_pct || 0}%</span>
           </div>
-          <Progress value={job.progress_pct} showLabel />
-          </div>
+          <Progress value={job.progress_pct || 0} />
+        </div>
+
         {/* Timeline */}
         <div className="relative pt-4 pb-8 overflow-x-auto">
           <div className="flex items-center min-w-[800px] px-4">
@@ -247,12 +253,27 @@ export function JobDetailPage() {
 
       {/* View Article */}
       {job.status === 'completed' && (
-        <div className="flex justify-end">
-          <Link to={`/articles`}>
-            <Button rightIcon={<ExternalLink className="w-4 h-4" />} shadow="lg">
-              View Final Article
-            </Button>
-          </Link>
+        <div className="bg-primary-50 dark:bg-primary-900/20 border border-primary-200 dark:border-primary-800 p-6 rounded-xl flex flex-col md:flex-row items-center justify-between gap-4">
+          <div className="flex items-center gap-4">
+            <div className="w-12 h-12 rounded-full bg-primary-100 dark:bg-primary-800 flex items-center justify-center text-primary-600 dark:text-primary-400">
+              <FileText className="w-6 h-6" />
+            </div>
+            <div>
+              <h3 className="text-lg font-bold text-gray-900 dark:text-white">Article is ready!</h3>
+              <p className="text-gray-600 dark:text-gray-400">Your content has been generated and is ready for review.</p>
+            </div>
+          </div>
+          <div className="flex gap-3">
+            {job.article_id ? (
+              <Link to={`/articles/${job.article_id}`}>
+                <Button rightIcon={<ExternalLink className="w-4 h-4" />}>
+                  Review Article
+                </Button>
+              </Link>
+            ) : (
+              <Button disabled isLoading>Finding Article...</Button>
+            )}
+          </div>
         </div>
       )}
     </div>

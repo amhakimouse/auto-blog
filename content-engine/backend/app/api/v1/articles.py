@@ -222,6 +222,23 @@ async def publish_article(
     )
     article.html_content = clean_html
 
+    # ── Update integration_id if provided ─────────────────────────────────────
+    if payload.integration_id:
+        # Validate ownership of the new integration
+        int_check = await db.execute(
+            select(Integration).where(
+                Integration.id == payload.integration_id,
+                Integration.user_id == user.id
+            )
+        )
+        if not int_check.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="The selected Brand Profile was not found."
+            )
+        article.integration_id = payload.integration_id
+        await db.flush()
+
     # ── Scheduled publish path ────────────────────────────────────────────────
     if payload.scheduled_publish_at is not None:
         # Ensure the datetime is UTC-aware

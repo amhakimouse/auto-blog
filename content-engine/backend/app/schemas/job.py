@@ -151,6 +151,7 @@ class JobRead(BaseModel):
     status: str
     progress_pct: int
     integration_id: uuid.UUID | None
+    article_id: uuid.UUID | None = None
     input_keyword: str | None
     input_url: str | None
     celery_task_id: str | None
@@ -160,7 +161,7 @@ class JobRead(BaseModel):
     updated_at: datetime
     completed_at: datetime | None
 
-    @field_serializer("id", "integration_id")
+    @field_serializer("id", "integration_id", "article_id")
     def serialize_uuids(self, value: uuid.UUID | None) -> str | None:
         return str(value) if value else None
 

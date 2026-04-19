@@ -21,7 +21,7 @@ import uuid
 from datetime import datetime, timezone
 
 from cryptography.fernet import Fernet
-from sqlalchemy import DateTime, ForeignKey, String, Text, text
+from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -60,6 +60,8 @@ class Integration(Base):
     wp_url: Mapped[str] = mapped_column(String(500), nullable=False)
     wp_username: Mapped[str] = mapped_column(String(255), nullable=False)
     wp_password_encrypted: Mapped[str] = mapped_column(String(1024), nullable=False)
+    is_connected: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("FALSE"))
+    last_tested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # ── Brand voice ───────────────────────────────────────────────────────────
     # Injected verbatim into the Gemini section-writer system prompt so every

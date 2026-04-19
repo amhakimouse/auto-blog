@@ -118,7 +118,7 @@ export function DashboardPage() {
                 </tr>
               </thead>
               <tbody>
-                {(recentJobs as Job[]).map((job) => (
+                {(Array.isArray(recentJobs) ? recentJobs : []).map((job: Job) => (
                   <tr key={job.id}>
                     <td className="capitalize">{getWorkflowLabel(job.workflow_type)}</td>
                     <td>

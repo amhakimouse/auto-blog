@@ -16,39 +16,36 @@ const AuthContext = createContext<AuthContextType | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
   const queryClient = useQueryClient();
+  const token = localStorage.getItem('token');
 
-  const { refetch } = useQuery({
+  // Use the query to fetch the user if a token exists
+  const { data, isLoading: queryLoading, isError, isSuccess, refetch } = useQuery({
     queryKey: ['user'],
-    queryFn: async () => {
-      const response = await auth.me();
-      return response as User;
-    },
-    enabled: false,
+    queryFn: () => auth.me(),
+    enabled: !!token,
     retry: false,
+    staleTime: 1000 * 60 * 5, // 5 minutes
   });
 
+  // Sync the query result with our local user state
   useEffect(() => {
-    const token = localStorage.getItem('token');
     if (token) {
-      refetch().then(({ data }) => {
-        if (data) {
-          setUser(data);
-        }
-        setIsLoading(false);
-      }).catch(() => {
+      if (isSuccess && data) {
+        setUser(data as User);
+      } else if (isError) {
         setUser(null);
-        setIsLoading(false);
-      });
+        localStorage.removeItem('token'); // Clear invalid token
+      }
     } else {
-      setIsLoading(false);
+      setUser(null);
     }
-  }, [refetch]);
+  }, [data, isSuccess, isError, token]);
 
   const login = (token: string, userData: User) => {
     localStorage.setItem('token', token);
     setUser(userData);
+    queryClient.setQueryData(['user'], userData);
   };
 
   const logout = () => {
@@ -58,12 +55,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const refetchUser = () => {
-    refetch().then(({ data }) => {
-      if (data) {
-        setUser(data);
-      }
-    });
+    refetch();
   };
+
+  // We are "loading" only if we have a token but the query hasn't finished yet
+  const isLoading = !!token && queryLoading && !data && !isError;
 
   return (
     <AuthContext.Provider value={{ user, isLoading, isAuthenticated: !!user, login, logout, refetchUser }}>
