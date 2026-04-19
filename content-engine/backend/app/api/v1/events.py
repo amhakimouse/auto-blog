@@ -83,12 +83,19 @@ def _job_to_sse_data(job: Job) -> str:
 
 
 def _is_terminal(status_value: str) -> bool:
-    """Return True if the job has reached a state where it will not change."""
+    """
+    Return True if the job has reached a state where it will not change
+    until the user takes explicit action.
+
+    awaiting_preview is included so the SSE stream closes immediately when
+    the pipeline pauses for human review — preventing a DB connection leak
+    that would otherwise persist for up to MAX_STREAM_DURATION_SECONDS.
+    The client is expected to re-open the stream after the user approves.
+    """
     return status_value in (
         JobStatus.COMPLETED.value,
         JobStatus.FAILED.value,
-        # 'cancelled' is stored as 'failed' with error_message = 'Cancelled by user.'
-        # but we check for it by status value just in case.
+        JobStatus.AWAITING_PREVIEW.value,
         "cancelled",
     )
 

@@ -4,7 +4,7 @@
 **Celery app:** `backend/app/worker/celery_app.py`  
 **Broker:** Redis at `CELERY_BROKER_URL`  
 **Result backend:** Redis at `CELERY_RESULT_BACKEND`  
-**Queue:** `default` (single queue for all tasks)  
+**Queues:** `default`, `fast-track` (AI workflows), `heavy-lifting` (asset processing), `io-bound` (scrapers/syncs)  
 **Sync DB session:** Created per-worker from `_SyncDB_URL` (psycopg2 driver, not asyncpg). Uses `sessionmaker` with a dedicated engine (`_sync_engine`) in `tasks.py`.
 
 ---
@@ -31,11 +31,12 @@ All workflow tasks extend this. Provides:
 ### `run_keyword_to_article`
 - Calls `KeywordPipeline(job_id, db, job).run()`
 - Registered via `celery_app.register_task(_KeywordToArticleTask())`
+- Handled by `fast-track` queue.
 
-### `process_link_workflow`  *(legacy, kept for compatibility)*
-- Inline implementation (not using `BaseJobTask`)
-- Calls `extract_article_content(url)` + `rewrite_article_for_seo()`
-- Use `run_reference_to_article` for new code
+### `run_reference_to_article`
+- Calls `ReferencePipeline(job_id, db, job).run()`
+- Registered via `celery_app.register_task(_ReferenceToArticleTask())`
+- Handled by `fast-track` queue.
 
 ### `sync_wp_links`
 - Fetches all published posts from a WP REST API (`/wp-json/wp/v2/posts`)

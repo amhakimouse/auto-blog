@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { jobs, integrations } from '@/lib/api';
 import { Card, Button, Input, Select, Toggle, Badge, Modal, Loading, Progress, useToast } from '@/components/ui';
-import { Plus, Search, X, Eye, Loader } from 'lucide-react';
+import { Plus, Search, X, Eye, Loader, Trash2 } from 'lucide-react';
 import { format } from 'date-fns';
 import { Job, Integration } from '@/types';
 import clsx from 'clsx';
@@ -39,6 +39,17 @@ export function JobsPage() {
     },
     onError: () => {
       addToast('error', 'Failed to cancel job');
+    },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: jobs.delete,
+    onSuccess: () => {
+      addToast('success', 'Job deleted successfully');
+      queryClient.invalidateQueries({ queryKey: ['jobs'] });
+    },
+    onError: () => {
+      addToast('error', 'Failed to delete job');
     },
   });
 
@@ -132,6 +143,20 @@ export function JobsPage() {
                             Cancel
                           </Button>
                         )}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-900/20"
+                          leftIcon={deleteMutation.isPending ? <Loader className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                          onClick={() => {
+                            if (window.confirm('Are you sure you want to delete this job?')) {
+                              deleteMutation.mutate(String(job.id));
+                            }
+                          }}
+                          disabled={deleteMutation.isPending}
+                        >
+                          Delete
+                        </Button>
                       </div>
                     </td>
                   </tr>

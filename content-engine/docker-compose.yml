@@ -103,8 +103,8 @@ services:
       --
       celery -A app.worker.celery_app worker
       --loglevel=info
-      --concurrency=1
-      --queues=default,high_priority"
+      --concurrency=2
+      --queues=default,fast-track,heavy-lifting,io-bound"
     healthcheck:
       test: ["CMD-SHELL", "celery -A app.worker.celery_app inspect ping || exit 1"]
       interval: 30s
@@ -160,6 +160,7 @@ services:
     environment:
       - WATCHTOWER_POLL_INTERVAL=3600  # Check for updates every hour
       - WATCHTOWER_CLEANUP=true        # Remove old images after updating
+      - WATCHTOWER_LABEL_ENABLE=true   # SAFE: only update labelled containers
     networks:
       - internal
 

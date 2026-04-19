@@ -41,3 +41,6 @@ structlog>=24.2.0
 # Advanced Scraping
 playwright>=1.44.0
 crawl4ai>=0.3.5
+
+# Image Processing
+Pillow>=10.3.0

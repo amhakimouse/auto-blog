@@ -1,3 +1,4 @@
+# DONE
 # 🚀 Advanced Performance & Scalability Roadmap (Phase 2)
 
 This document specifies high-impact optimizations for the **Content Automation Engine**. These features focus on reducing perceived latency, optimizing token costs, and ensuring multi-user stability.
@@ -10,12 +11,12 @@ Instead of generating images one by one, we generate and upload all requested im
 ### Visual Workflow
 ```mermaid
 graph TD
-    Start[Unified Analysis Done] -->|Extract Image Prompts| Split{Parallel Split}
+    Start[Unified Analysis Done] -->|Extract json parameters| Split{Parallel Split}
     
     subgraph "Parallel Asset Processing"
-        Split --> Img1[Imagen: Image 1 + WP Upload]
-        Split --> Img2[Imagen: Image 2 + WP Upload]
-        Split --> ImgN[Imagen: Image N + WP Upload]
+        Split --> Img1[Imagen: Image 1 + WP Upload + seo data]
+        Split --> Img2[Imagen: Image 2 + WP Upload + seo data]
+        Split --> ImgN[Imagen: Image N + WP Upload + seo data]
     end
     
     Img1 --> Join[Collect All WP Links]
@@ -73,24 +74,7 @@ graph TD
 
 ---
 
-## 📤 Feature 4: Speculative Media Processing (Lazy Upload)
-Optimize perceived speed by decoupling the WordPress upload from the job completion.
-
-### State Diagram
-```mermaid
-stateDiagram-v2
-    [*] --> Generated: Image Created
-    Generated --> LocalStorage: Save WebP to Temp Store
-    LocalStorage --> JobComplete: Notify User (Success)
-    JobComplete --> WPSync: Background Sync Worker
-    WPSync --> [*]: WP Media & SEO Updated
-```
-
-**Agent Note:** This allows the user to see the "Job Finished" status even if the WordPress REST API is lagging. Store images in a local `temp/` folder or S3-compatible storage.
-
----
-
-## 🚥 Feature 5: Priority-Based Celery Queues
+## 🚥 Feature 4: Priority-Based Celery Queues
 Ensure "fast" tasks (text) aren't stuck behind "heavy" tasks (images).
 
 ### Queue Architecture
@@ -115,7 +99,4 @@ graph TD
 ## 🎓 Mentor's Final Verdict for the Agent
 
 1.  **Safety First:** When implementing the "Split-Join" (Feature 1), ensure that if the Image Branch fails, the Text Branch can still finish and notify the user with "Text ready, images failed."
-2.  **Statelessness:** Ensure the "Lazy Upload" (Feature 4) can survive a worker restart. The `temp/` storage path should be part of the Job model in the database.
-3.  **Cost Monitoring:** For Vertex Caching (Feature 2), monitor the cache creation costs—only cache prefixes longer than 2048 tokens to ensure it's cost-effective.
-
-**Coding Agent:** Please review `suggestions.md` (Workflow logic) and `suggestions2.md` (Performance logic) together before proposing the refactor plan.
+2.  **Cost Monitoring:** For Vertex Caching (Feature 2), monitor the cache creation costs—only cache prefixes longer than 2048 tokens to ensure it's cost-effective.

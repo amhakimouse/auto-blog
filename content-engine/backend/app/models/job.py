@@ -133,3 +133,10 @@ class Job(Base):
             f"<Job id={self.id} workflow={self.workflow_type!r} "
             f"status={self.status!r}>"
         )
+
+    @property
+    def article_id(self) -> uuid.UUID | None:
+        # Avoid MissingGreenlet by using __dict__ check or assuming it's loaded
+        if "article" in self.__dict__ and self.article is not None:
+            return self.article.id
+        return None

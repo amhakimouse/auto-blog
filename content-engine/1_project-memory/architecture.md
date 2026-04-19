@@ -70,7 +70,7 @@ User / Frontend
 1. **API layer = thin shell.** It validates, creates a DB row, sends a Celery task, returns 202.
 2. **Worker contains all logic.** Pipeline classes handle scraping, AI calls, DB writes.
 3. **Idempotent upserts.** Every pipeline uses get-or-create for Article rows — safe for retries.
-4. **Async API, sync worker.** FastAPI uses asyncpg; Celery workers use psycopg2 + `asyncio.run()` to bridge async scrapers.
+4. **Async API, sync worker.** FastAPI uses asyncpg; Celery workers use psycopg2 + `asyncio.run()` to bridge async workloads. We use `asyncio.gather()` inside the sync worker to achieve concurrency (e.g., for asset generation), avoiding Celery `group` deadlocks.
 5. **Secrets via env vars.** Never hardcoded. `app/config.py` (pydantic-settings) is the single source of truth.
 
 ---

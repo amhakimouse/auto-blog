@@ -23,6 +23,7 @@ from jose import jwt
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from sqlalchemy import desc, select
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_current_active_user
@@ -169,11 +170,11 @@ async def create_job(
         kwargs=task_kwargs,
         queue="default",
     )
-    
-    # Update job with celery task id in a separate background update or just log it
-    # Since we already committed, we might want to update it again if we really need the task ID
-    # But for now, ensuring visibility is more important.
-    
+
+    # Persist the Celery task ID so cancel/revoke works
+    job.celery_task_id = celery_result.id
+    await db.commit()
+
     log.info(
         "jobs.created",
         job_id=str(job.id),
@@ -260,16 +261,10 @@ async def create_bulk_jobs(
 
     await db.commit()
 
-    # ── Dispatch Celery tasks AFTER commit ──────────────────────────
-    for job_id in job_ids:
-        # We need the workflow type for the task map. In a real app we'd fetch or store it.
-        # For this fix, I'll just refetch the jobs to be safe or use the original payload.
-        pass
-
-    # Re-fetch jobs to get their workflow types for dispatching
+    # ── Dispatch Celery tasks AFTER commit — persist task IDs ──────────────
     result = await db.execute(select(Job).where(Job.id.in_(job_ids)))
     db_jobs = result.scalars().all()
-    
+
     for db_job in db_jobs:
         task_kwargs = {"job_id": str(db_job.id)}
         celery_result = celery_app.send_task(
@@ -277,8 +272,10 @@ async def create_bulk_jobs(
             kwargs=task_kwargs,
             queue="default",
         )
-        # Optional: update task ID in background if needed
-    
+        db_job.celery_task_id = celery_result.id
+
+    await db.commit()
+
     log.info(
         "jobs.bulk_created",
         user_id=str(user.id),
@@ -323,6 +320,7 @@ async def list_jobs(
     """
     result = await db.execute(
         select(Job)
+        .options(selectinload(Job.article))
         .where(Job.user_id == user.id)
         .order_by(desc(Job.created_at))
         .limit(limit)
@@ -345,7 +343,9 @@ async def get_job(
     user: User = Depends(get_current_active_user),
 ) -> Job:
     result = await db.execute(
-        select(Job).where(Job.id == job_id, Job.user_id == user.id)
+        select(Job)
+        .options(selectinload(Job.article))
+        .where(Job.id == job_id, Job.user_id == user.id)
     )
     job = result.scalar_one_or_none()
     if job is None:
@@ -355,11 +355,10 @@ async def get_job(
     return job
 
 
-# ── DELETE /jobs/{job_id} ─────────────────────────────────────────────────────
+# ── POST /jobs/{job_id}/cancel ───────────────────────────────────────────────────
 
-
-@router.delete(
-    "/{job_id}",
+@router.post(
+    "/{job_id}/cancel",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Cancel a pending job",
 )
@@ -391,6 +390,38 @@ async def cancel_job(
     job.completed_at = datetime.now(timezone.utc)
     await db.commit()
     log.info("jobs.cancelled", job_id=str(job_id))
+
+
+# ── DELETE /jobs/{job_id} ─────────────────────────────────────────────────────
+
+@router.delete(
+    "/{job_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete a job",
+)
+async def delete_job(
+    job_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_active_user),
+) -> None:
+    result = await db.execute(
+        select(Job).where(Job.id == job_id, Job.user_id == user.id)
+    )
+    job = result.scalar_one_or_none()
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Job not found"
+        )
+
+    # Cancel if it's currently running
+    if job.status in (JobStatus.PENDING.value, JobStatus.PROCESSING.value) and job.celery_task_id:
+        celery_app.control.revoke(job.celery_task_id, terminate=True)
+
+    await db.delete(job)
+    await db.commit()
+    log.info("jobs.deleted", job_id=str(job_id))
+
+
 
 
 # ── POST /jobs/{job_id}/resume ────────────────────────────────────────────────

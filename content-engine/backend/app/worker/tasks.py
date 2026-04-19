@@ -122,12 +122,28 @@ class BaseJobTask(Task):
                 log.error("task.job_not_found", task=self.name, job_id=job_id)
                 return {"status": "error", "detail": "Job not found"}
 
-            _set_processing(db, job)
+            # Only set to PROCESSING if it's starting fresh.
+            # If it's AWAITING_PREVIEW, leave it alone so the pipeline knows to resume.
+            if job.status == JobStatus.PENDING.value:
+                _set_processing(db, job)
+
             try:
                 result_meta = self.execute(job_id=job_id, db=db, job=job)
-                _set_completed(db, job, meta_update=result_meta)
-                log.info("task.completed", task=self.name, job_id=job_id)
-                return {"status": "completed", "job_id": job_id}
+                
+                # If the pipeline returned a status that is not completed (e.g. awaiting_preview),
+                # we update the meta but don't call _set_completed which would mark it finished.
+                if result_meta and result_meta.get("status") == JobStatus.AWAITING_PREVIEW.value:
+                    if job.meta is None:
+                        job.meta = {}
+                    job.meta.update(result_meta)
+                    flag_modified(job, "meta")
+                    db.commit()
+                    log.info("task.paused_for_preview", task=self.name, job_id=job_id)
+                else:
+                    _set_completed(db, job, meta_update=result_meta)
+                    log.info("task.completed", task=self.name, job_id=job_id)
+                
+                return {"status": "success", "job_id": job_id}
 
             except ArticleExtractionError as exc:
                 log.warning(

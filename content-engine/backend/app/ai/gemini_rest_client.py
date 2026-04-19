@@ -226,6 +226,68 @@ class ContextCacheManager:
             raise GeminiApiError(f"Failed to create context cache: {exc}") from exc
 
 
+def _parse_response(raw_text: str) -> str:
+    """
+    Parse the response text from Gemini.
+    Handles both unary responses and NDJSON streaming chunks.
+    """
+    if not raw_text:
+        return ""
+
+    full_text_parts = []
+    
+    # 1. Try parsing as a single JSON object (unary)
+    try:
+        data = json.loads(raw_text)
+        # If it's a list, it might be NDJSON already parsed as a list by some middleware
+        # or it's a streaming response body formatted as a list
+        if isinstance(data, list):
+            for chunk in data:
+                for candidate in chunk.get("candidates", []):
+                    for part in candidate.get("content", {}).get("parts", []):
+                        if "text" in part:
+                            full_text_parts.append(part["text"])
+        else:
+            # Single object
+            for candidate in data.get("candidates", []):
+                for part in candidate.get("content", {}).get("parts", []):
+                    if "text" in part:
+                        full_text_parts.append(part["text"])
+        
+        if full_text_parts:
+            return "".join(full_text_parts)
+    except json.JSONDecodeError:
+        # Not a single JSON object, try NDJSON line-by-line
+        pass
+
+    # 2. Parse as NDJSON (one JSON object per line)
+    # Vertex AI streamGenerateContent returns a JSON array-like structure but 
+    # the REST response can be a JSON array of objects or just concatenated objects.
+    
+    # Clean up common wrapper characters if present [ ... ]
+    cleaned = raw_text.strip()
+    if cleaned.startswith("[") and cleaned.endswith("]"):
+        cleaned = cleaned[1:-1].strip()
+    
+    # Split by JSON boundaries
+    # Heuristic: split before each {"candidates"
+    chunks = re.split(r',?\s*(?={"candidates")', cleaned)
+    
+    for chunk in chunks:
+        if not chunk.strip():
+            continue
+        try:
+            data = json.loads(chunk)
+            for candidate in data.get("candidates", []):
+                for part in candidate.get("content", {}).get("parts", []):
+                    if "text" in part:
+                        full_text_parts.append(part["text"])
+        except json.JSONDecodeError:
+            continue
+
+    return "".join(full_text_parts)
+
+
 def generate_content_rest(
     system_prompt: str | None,
     user_message: str,

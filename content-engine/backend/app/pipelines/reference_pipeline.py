@@ -1,147 +1,279 @@
 """
-app/pipelines/reference_pipeline.py — Workflow 2: Competitor Link → Article.
+app/pipelines/reference_pipeline.py — Workflow 2: Reference URL → Article.
 
-Refactored to use the Unified Analysis Pattern and robust asset processing.
+8-stage pipeline with granular status labels surfaced to the frontend via SSE:
+
+  Stage 1  (10%)  scraping           Extract content from the reference URL
+  Stage 2  (30%)  content_extracted  Extracted content stored; shown in frontend
+  Stage 3  (45%)  analyzing          Single-shot Gemini unified analysis
+  Stage 4  (60%)  awaiting_preview   Analysis table shown; user approves to continue
+  --- user clicks Approve & Resume ---
+  Stage 5  (65%)  generating_assets  Concurrent Imagen + WebP + WP media upload
+  Stage 6  (85%)  writing            Gemini final HTML structuring
+  Stage 7  (92%)  publishing         WP create draft post + RankMath SEO meta
+  Stage 8  (100%) completed          Article row saved; credits deducted by BaseJobTask
+
+Same rules as KeywordPipeline:
+  - Existing scraping system (article_scraper.py) is untouched.
+  - Images via asyncio.gather — no Celery group.
+  - bleach.clean() always applied.
 """
 from __future__ import annotations
 
 import asyncio
-import base64
-import re
-from datetime import datetime, timezone
 
-import bleach
 import structlog
 
 from app.logger import get_logger
-from app.models.article import Article, ArticleStatus
 from app.models.job import Job, JobStatus
 from app.pipelines.base import BasePipeline
 from sqlalchemy.orm import Session
-from sqlalchemy.orm.attributes import flag_modified
 
 log = get_logger(__name__)
 
+_MAX_IMAGES: int = 5
+
+
 class ReferencePipeline(BasePipeline):
+    """Workflow 2: Reference URL → SEO Article."""
+
     def __init__(self, job_id: str, db: Session, job: Job) -> None:
         super().__init__(job_id, db, job)
         self.url: str = job.input_url or ""
-        meta = job.meta or {}
-        self.content_image_count = max(0, min(int(meta.get("content_image_count", 0)), 5))
-        self._logger = log.bind(job_id=job_id, pipeline="reference", url=self.url)
+        meta: dict = job.meta or {}
+        self.content_image_count: int = max(
+            0, min(int(meta.get("content_image_count", 1)), _MAX_IMAGES)
+        )
+        self.include_featured_image: bool = bool(meta.get("include_featured_image", True))
+        self._logger: structlog.BoundLogger = log.bind(
+            job_id=job_id,
+            pipeline="reference",
+            url=self.url,
+        )
+
+    # ── Entry point ────────────────────────────────────────────────────────────
 
     def run(self) -> dict:
+        self._logger.info("reference_pipeline.run", status=self.job.status)
+
+        # Resume path — user approved the preview
         if self.job.status == JobStatus.AWAITING_PREVIEW.value:
-            return self._resume_generation()
+            return self._resume_after_preview()
 
-        self._set_job_status("scraping", progress=10)
-        from app.scrapers.article_scraper import extract_article_content
-        markdown = asyncio.run(extract_article_content(self.url))
-        
-        if self.job.meta is None: self.job.meta = {}
-        self.job.meta["extracted_source"] = markdown
-        self.db.commit()
+        # ── Stage 1: Scrape reference URL ──────────────────────────────────────
+        self._set_step("scraping", 10, f"Extracting content from {self.url}...")
+        content = self._scrape_url()
 
-        self._set_job_status("analyzing", progress=35)
+        # ── Stage 2: Content extracted ─────────────────────────────────────────
+        self._set_step(
+            "content_extracted", 30,
+            "Content extracted ✓",
+            meta_patch={
+                "scraped_urls": [
+                    {"url": self.url, "chars": len(content), "status": "ok"}
+                ],
+                "extracted_source": content[:20_000],
+            },
+        )
+
+        # ── Stage 3: Unified Gemini analysis ──────────────────────────────────
+        self._set_step("analyzing", 45, "Running AI content analysis...")
         from app.ai.gemini_writer import run_unified_analysis
-        analysis = run_unified_analysis(markdown, logger=self._logger)
-        
-        self.job.meta["unified_analysis"] = analysis
-        flag_modified(self.job, "meta")
-        self.db.commit()
 
-        self._set_job_status(JobStatus.AWAITING_PREVIEW.value, progress=60)
-        return {"status": "awaiting_preview", "analysis": analysis}
+        num_images = self.content_image_count + (1 if self.include_featured_image else 0)
+        analysis = run_unified_analysis(
+            content,
+            num_images=num_images,
+            logger=self._logger,
+        )
 
-    def _resume_generation(self) -> dict:
-        analysis = self.job.meta.get("unified_analysis")
-        self._set_job_status(JobStatus.PROCESSING.value, progress=65)
-        
-        # ── Stage 3: Parallel Asset Pipeline ──────────────────────────────────
-        self._set_job_status("generating_assets", progress=75)
-        from celery import group
-        from app.worker.tasks import process_single_asset
-        
-        prompts = analysis.get("image_prompts", [])[:self.content_image_count + 1]
-        self._logger.info("reference_pipeline.parallel_assets.started", count=len(prompts))
+        # ── Stage 4: Pause for user preview ────────────────────────────────────
+        self._set_step(
+            JobStatus.AWAITING_PREVIEW.value, 60,
+            "Analysis complete — waiting for your approval...",
+            meta_patch={"unified_analysis": analysis},
+        )
+        return {"status": JobStatus.AWAITING_PREVIEW.value}
 
-        job_tasks = [
-            process_single_asset.s(p_data, str(self.job.integration_id) if self.job.integration_id else None) 
-            for p_data in prompts
-        ]
-        
-        results = group(job_tasks).apply_async().get(disable_sync_subtasks=False)
-        self._logger.info("reference_pipeline.parallel_assets.joined", success_count=len([r for r in results if r["status"] == "success"]))
+    # ── Resume (stages 5-8) ────────────────────────────────────────────────────
 
-        # ── Stage 4: HTML Structuring ─────────────────────────────────────────
-        self._set_job_status("writing", progress=85)
-        final_payload = self._generate_final_content(analysis, results)
-        
-        # ── Stage 5: Finalize & Speculative Sync ──────────────────────────────
-        self._finalize_refactored(final_payload, results)
-        self._set_job_status(JobStatus.COMPLETED.value, progress=100)
-        return {"status": "completed"}
+    def _resume_after_preview(self) -> dict:
+        meta: dict = self.job.meta or {}
+        analysis: dict | None = meta.get("unified_analysis")
+        if not analysis:
+            raise RuntimeError(
+                "Cannot resume: unified_analysis missing from job.meta. "
+                "The job may need to be re-submitted."
+            )
 
-    def _generate_final_content(self, analysis: dict, asset_results: list[dict]) -> dict:
-        from app.ai.gemini_rest_client import generate_content_rest
-        
-        image_markdown_map = {}
-        for i, res in enumerate(asset_results):
-            if res["status"] == "success":
-                url = res.get("wp_url") or f"data:image/webp;base64,{res['webp_base64']}"
-                image_markdown_map[f"IMAGE_PLACEHOLDER_{i}"] = url
-            else:
-                image_markdown_map[f"IMAGE_PLACEHOLDER_{i}"] = ""
+        integration = self._load_integration()
 
-        prompt = f"""Write an SEO article in HTML.
-Focus Keyword: {analysis.get('focus_keyword')}
-Title: {analysis.get('title')}
-Inject {len(asset_results)} placeholders: <img src="IMAGE_PLACEHOLDER_N">.
-"""
-        raw_html = generate_content_rest(system_prompt=prompt, user_message=analysis.get("markdown_content", ""), logger=self._logger)
-        raw_html = re.sub(r"^```(?:html)?\s*", "", raw_html, flags=re.IGNORECASE).strip(" `\n")
-        
-        for key, val in image_markdown_map.items():
-            if val:
-                raw_html = raw_html.replace(key, val)
-            else:
-                raw_html = re.sub(f'<img[^>]*src="{key}"[^>]*>', "", raw_html)
+        # ── Stage 5: Concurrent image generation ──────────────────────────────
+        num_images = self.content_image_count + (1 if self.include_featured_image else 0)
+        prompts = analysis.get("image_prompts", [])[:num_images]
 
-        return {
-            "title": analysis["title"], 
-            "html_content": raw_html, 
-            "slug": analysis["slug"], 
-            "meta_description": analysis["seo_description"], 
-            "focus_keyword": analysis["focus_keyword"]
+        self._set_step(
+            "generating_assets", 65,
+            f"Starting {len(prompts)} image generation(s)...",
+        )
+
+        def _step_cb(label: str) -> None:
+            self._set_step("generating_assets", 70, label)
+
+        from app.pipelines._pipeline_helpers import run_concurrent_image_pipeline
+        image_results = run_concurrent_image_pipeline(
+            prompts=prompts,
+            integration=integration,
+            logger=self._logger,
+            step_cb=_step_cb,
+        )
+
+        # Store image previews for frontend
+        self._set_step(
+            "writing", 85,
+            "Writing final SEO article HTML...",
+            meta_patch={
+                "generated_images": [
+                    {
+                        "index": r["index"],
+                        "status": r["status"],
+                        "webp_base64": r.get("webp_base64"),
+                        "wp_url": r.get("wp_url"),
+                        "metadata": r.get("metadata", {}),
+                    }
+                    for r in image_results
+                ]
+            },
+        )
+
+        # ── Stage 6: Final HTML structuring ───────────────────────────────────
+        from app.pipelines._pipeline_helpers import generate_final_html
+        final_html = generate_final_html(analysis, image_results, self._logger)
+
+        payload = {
+            "title": analysis["title"],
+            "html_content": final_html,
+            "slug": analysis["slug"],
+            "meta_description": analysis["seo_description"],
+            "focus_keyword": analysis["focus_keyword"],
         }
 
-    def _finalize_refactored(self, payload: dict, asset_results: list[dict]) -> None:
-        from app.worker.tasks import publish_article_to_wp
-        
-        images_meta = []
-        for res in asset_results:
-            if res["status"] == "success":
-                images_meta.append({
-                    "url": res.get("wp_url"),
-                    "base64": res.get("webp_base64") if not res.get("wp_url") else None,
-                    "metadata": res.get("metadata")
-                })
+        from app.pipelines._pipeline_helpers import save_article
+        article = save_article(self.db, self.job, payload, image_results)
 
-        article = self.db.query(Article).filter(Article.job_id == self.job.id).first()
-        if not article:
-            article = Article(job_id=self.job.id, user_id=self.job.user_id, integration_id=self.job.integration_id)
-            self.db.add(article)
+        # ── Stage 7: Publish to WordPress ─────────────────────────────────────
+        if integration:
+            self._set_step("publishing", 92, "Creating WordPress draft post...")
+            self._publish_to_wp(article, integration, analysis)
 
-        article.title, article.slug, article.html_content = payload["title"], payload["slug"], payload["html_content"]
-        article.focus_keyword, article.meta_description = payload["focus_keyword"], payload["meta_description"]
-        article.article_status = ArticleStatus.DRAFT_READY
-        article.meta = {"images": images_meta}
-        self.db.commit()
+        # ── Stage 8: Complete ──────────────────────────────────────────────────
+        self._set_step(JobStatus.COMPLETED.value, 100, "Article ready! ✓")
+        return {"status": "completed", "article_id": str(article.id)}
 
-        if self.job.integration_id:
-            self._logger.info("reference_pipeline.wp_sync.dispatched")
-            publish_article_to_wp.delay(str(article.id))
+    # ── Stage helpers ──────────────────────────────────────────────────────────
 
-    def _set_job_status(self, status: str, progress: int) -> None:
-        self.job.status, self.job.progress_pct = status, progress
-        self.db.commit()
+    def _scrape_url(self) -> str:
+        """Extract content from the reference URL using the existing scraper."""
+        from app.scrapers.article_scraper import (
+            extract_article_content,
+            ArticleExtractionError,
+        )
+        try:
+            content = asyncio.run(extract_article_content(self.url))
+            self._logger.info("reference_pipeline.scrape_ok", chars=len(content))
+            return content
+        except ArticleExtractionError as exc:
+            self._logger.error("reference_pipeline.scrape_failed", error=str(exc))
+            raise
+        except Exception as exc:
+            self._logger.error("reference_pipeline.scrape_unexpected", error=str(exc))
+            raise
+
+    def _load_integration(self):
+        if not self.job.integration_id:
+            return None
+        from app.models.integration import Integration
+        integration = (
+            self.db.query(Integration)
+            .filter(Integration.id == self.job.integration_id)
+            .first()
+        )
+        if integration is None:
+            self._logger.warning(
+                "reference_pipeline.integration_not_found",
+                integration_id=str(self.job.integration_id),
+            )
+        return integration
+
+    def _publish_to_wp(self, article, integration, analysis: dict) -> None:
+        """Create a WordPress draft post and update RankMath SEO meta."""
+        import base64 as _b64
+
+        from app.integrations.wordpress import (
+            WordPressPublisher,
+            WordPressPublishError,
+            WordPressSEOError,
+        )
+
+        # Resolve featured image from article images
+        image_bytes: bytes | None = None
+        featured_media_id: int | None = None
+        image_alt: str = article.title
+        for img in article.images or []:
+            if img.get("wp_media_id"):
+                featured_media_id = img["wp_media_id"]
+                image_alt = (img.get("metadata") or {}).get("alt_text", article.title)
+                break
+            elif img.get("webp_base64") and not img.get("url"):
+                try:
+                    image_bytes = _b64.b64decode(img["webp_base64"])
+                    image_alt = (img.get("metadata") or {}).get("alt_text", article.title)
+                    break
+                except Exception:
+                    pass
+
+        publisher = WordPressPublisher(
+            wp_site_url=integration.wp_url,
+            wp_username=integration.wp_username,
+            wp_app_password=integration.wp_password,
+        )
+
+        try:
+            pub_result = asyncio.run(
+                publisher.publish(
+                    title=article.title,
+                    html_content=article.html_content,
+                    image_bytes=image_bytes,
+                    featured_media_id=featured_media_id,
+                    image_alt=image_alt,
+                    slug=article.slug,
+                    meta_description=article.meta_description,
+                    focus_keyword=article.focus_keyword,
+                    post_status="draft",
+                )
+            )
+            article.wp_post_id = pub_result["wp_post_id"]
+            article.wp_post_url = pub_result["wp_post_url"]
+            if pub_result.get("featured_image_url"):
+                article.featured_image_url = pub_result["featured_image_url"]
+            self.db.commit()
+            self._logger.info(
+                "reference_pipeline.wp_published",
+                wp_post_id=article.wp_post_id,
+                url=article.wp_post_url,
+            )
+        except WordPressSEOError as exc:
+            # SEO meta failed — article was still created, log and continue
+            self._logger.warning("reference_pipeline.wp_seo_failed", error=str(exc))
+            warnings = self.job.meta.get("warnings", [])
+            warnings.append(f"RankMath SEO Warning: {exc}")
+            self.job.meta["warnings"] = warnings
+            self.db.commit()
+        except WordPressPublishError as exc:
+            self._logger.warning("reference_pipeline.wp_publish_failed", error=str(exc))
+            warnings = self.job.meta.get("warnings", [])
+            warnings.append(f"WP Publish Warning: {exc}")
+            self.job.meta["warnings"] = warnings
+            self.db.commit()
+        except Exception as exc:
+            self._logger.error("reference_pipeline.wp_unexpected", error=str(exc))
