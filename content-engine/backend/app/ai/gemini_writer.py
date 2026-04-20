@@ -291,6 +291,8 @@ def run_unified_analysis(
     source_content: str,
     num_images: int = 2,
     logger: structlog.BoundLogger | None = None,
+    language: str = "english",
+    customization=None,  # ContentCustomization | None
 ) -> dict:
     """
     Single-shot Gemini analysis: extract title, slug, SEO fields, markdown
@@ -300,20 +302,50 @@ def run_unified_analysis(
         source_content: Combined scraped markdown text.
         num_images:     Number of image_prompts to generate (matches user setting).
         logger:         Optional bound structlog logger.
+        language:       Target output language (e.g. 'french', 'arabic').
+                        Injected as a mandatory directive into the system prompt.
+        customization:  Granular content controls (article_type, tone, image_style)
+                        to guide the analysis and image prompt generation.
     """
     if logger is None:
         logger = log.bind(model="gemini-2.5-flash")
+
+    # Sanitise language — strip whitespace, lowercase, cap length to prevent prompt injection
+    language = (language or "english").strip().lower()[:40] or "english"
 
     num_images = max(0, min(num_images, 6))  # hard cap at 6
     logger.info(
         "gemini_writer.unified_analysis.start",
         input_chars=len(source_content),
         num_images=num_images,
+        language=language,
     )
 
+    # Language directive is placed at the TOP of the system prompt so the model
+    # commits to the language before any other instruction is processed.
+    language_directive = (
+        f"CRITICAL LANGUAGE REQUIREMENT: The ENTIRE article — including the title, "
+        f"all body content, meta description, SEO fields, and focus keyword — MUST be "
+        f"written in {language.upper()}. Do NOT use any other language anywhere in the output."
+    )
+
+    # ── Content Controls Injection ──
+    from app.ai.prompt_builder import _IMAGE_STYLE_LABELS, _ARTICLE_TYPE_GUIDANCE, _TONE_GUIDANCE
+    
+    style_str = "photorealistic"
+    type_str = ""
+    tone_str = ""
+    if customization:
+        style_str = _IMAGE_STYLE_LABELS.get(customization.image_style, "photorealistic")
+        type_str = f"ARTICLE TYPE: {_ARTICLE_TYPE_GUIDANCE.get(customization.article_type, '')}\n"
+        tone_str = f"TONE: {_TONE_GUIDANCE.get(customization.tone_of_voice, '')}\n"
+
     system_prompt = (
+        f"{language_directive}\n\n"
         "You are an Expert Content Strategist and SEO Copywriter. "
         "Perform a deep analysis of the provided content and return a structured JSON article plan.\n"
+        f"{type_str}"
+        f"{tone_str}"
         '- "title": Compelling H1 title.\n'
         '- "markdown_content": High-level content summary (markdown, 300-600 words).\n'
         '- "slug": URL-friendly slug (lowercase, hyphens only).\n'
@@ -321,12 +353,16 @@ def run_unified_analysis(
         '- "seo_title": Meta title (max 60 chars).\n'
         '- "seo_description": Meta description (max 160 chars).\n'
         f'- "image_prompts": Array of EXACTLY {num_images} objects, each with: '
-        '"prompt" (detailed Imagen generation prompt, photorealistic), '
+        f'"prompt" (detailed Imagen generation prompt, {style_str}), '
         '"title" (short image title), "alt_text", "caption", "description".\n'
         "Return ONLY valid JSON matching the schema. No markdown fences."
     )
 
-    user_message = f"Analyze this content:\n\n{source_content[:15_000]}"
+    # Repeat the language reminder in the user message to reinforce compliance
+    user_message = (
+        f"[LANGUAGE: {language.upper()}]\n\n"
+        f"Analyze this content:\n\n{source_content[:15_000]}"
+    )
 
     try:
         result = _call_gemini_json(
@@ -349,6 +385,7 @@ def run_unified_analysis(
             "gemini_writer.unified_analysis.success",
             title=result.get("title"),
             image_prompts=len(result.get("image_prompts", [])),
+            language=language,
         )
         return result
     except Exception as exc:

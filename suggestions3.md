@@ -1,3 +1,4 @@
+# NOT DONE
 # 🚀 Auto-Blog SaaS: Advanced Feature Blueprint (Phase 3)
 
 This document serves as the technical specification and architectural blueprint for the Coder LLM to implement the next major features for the Auto-Blog platform. It is broken down into three high-impact tiers.
@@ -7,28 +8,28 @@ This document serves as the technical specification and architectural blueprint 
 ## 🥇 Tier 1: SEO & Publishing Power
 These features elevate the platform by fully automating the publishing lifecycle and maximizing SEO value through contextual linking.
 
-### 1. Drip-Feed Scheduling
-**Goal:** Allow users to generate a batch of articles today, but publish them slowly over time (e.g., 1 per day).
+### 1. Scheduled Execution (Drip-Feed) [did with claude but not confirmed]
+**Goal:** Allow users to queue up to 10 tasks (keywords or reference links) with assigned execution dates. The system waits until the date arrives, then generates and publishes the article.
 
 ```mermaid
 graph TD
-    UI[Frontend: Select 'Schedule Dates'] --> API[POST /jobs]
-    API --> DB[("Save Job with publish_at timestamp")]
-    DB --> Worker[Celery Worker: Generate Article]
-    Worker --> Draft[("Save Article as Status='scheduled'")]
+    UI[Frontend: Queue 10 Tasks + Dates] --> API[POST /jobs/batch]
+    API --> DB[("Save Jobs with execute_at timestamp & Status='queued'")]
     
-    Beat((Celery Beat: Hourly Cron)) --> Check{"Check publish_at <= NOW()"}
-    Check -- Yes --> Publish[WP Publisher Task]
+    Beat((Celery Beat: Hourly Cron)) --> Check{"Check execute_at <= NOW()"}
+    Check -- Yes --> Worker[Celery Worker: Generate Article]
+    Worker --> Publish[WP Publisher Task]
     Publish --> Live[Status='published']
     Check -- No --> Wait[Wait for next hour]
 ```
 **Implementation Notes:**
-- Add `publish_at` (DateTime) to `Article` model.
+- Add `execute_at` (DateTime) to the `Job` model (rather than `Article` model).
+- Add validation to limit batch submissions to a maximum of 10 tasks.
 - Setup Celery Beat in `celery_app.py` with an hourly `crontab`.
-- Create a new Celery task `publish_scheduled_articles` that queries the DB and runs `WordPressPublisher`.
+- Create a new Celery task `process_scheduled_jobs` that queries the DB for `queued` jobs where `execute_at <= NOW()` and dispatches the generation pipeline.
 
-### 2. Smart Internal Linking Engine
-**Goal:** The AI should automatically weave links to the user's older WordPress posts into the new article.
+### 2. Smart Internal Linking Engine [did with claude but not confirmed]
+**Goal:** The AI should automatically weave links to the user's older WordPress posts into the new article in matched keyword.
 
 ```mermaid
 sequenceDiagram
@@ -37,8 +38,8 @@ sequenceDiagram
     participant Gemini as Gemini 1.5
 
     Worker->>WP: GET /wp-json/wp/v2/posts?per_page=50
-    WP-->>Worker: Return recent posts (Titles + URLs)
-    Worker->>Gemini: Inject Posts into System Prompt
+    WP-->>Worker: Return recent posts (query only: Titles + URLs)
+    Worker->>Gemini: Inject Posts into System Prompt (with text content to include in final HTML)
     Note over Gemini: "Weave 2-3 contextual links<br/>to these URLs into the article."
     Gemini-->>Worker: HTML with <a href="..."> internal links
 ```
@@ -60,23 +61,15 @@ sequenceDiagram
 
     Beat->>Scraper: Check monitored RSS feeds
     Scraper->>Scraper: Parse XML
-    alt New URL found not in DB
+    alt New URL found today
         Scraper->>DB: Log URL as processed
         Scraper->>Pipeline: Dispatch Reference_to_Article Job
         Pipeline->>Pipeline: Generate & Publish
     end
 ```
-
-### 4. Webhook / Zapier Integration
-**Goal:** Allow external triggers (Airtable, Notion, Make.com) to start jobs.
-**Implementation Notes:**
-- Create a new endpoint `POST /api/v1/webhooks/trigger`.
-- Secure it with a static API key tied to the User's account instead of JWT auth.
-- The payload should mirror `JobCreate` schema.
-
 ---
 
-## 🥉 Tier 3: Quality & Customization
+## 🥉 Tier 3: Quality & Customization [did with claude but not confirmed]
 Granular controls over the AI output to cater to high-end B2B users.
 
 ### 5. Granular Content Controls
@@ -106,11 +99,3 @@ sequenceDiagram
     Note over Gemini: "Write a Witty Listicle...<br/>Format as content_cards."
     Gemini-->>Celery: Custom HTML Output
 ```
-
-### 6. Human-in-the-Loop Editor
-**Goal:** A WYSIWYG editor allowing users to tweak AI content before WordPress publication.
-**Implementation Notes:**
-- Pause pipeline at `AWAITING_PREVIEW` status.
-- UI renders `TipTap` or `Quill.js` editor populated with `article.html_content`.
-- User clicks "Publish", sending the updated HTML back to the backend.
-- Backend resumes pipeline and pushes the final modified HTML to WordPress.

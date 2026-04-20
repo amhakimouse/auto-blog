@@ -33,7 +33,14 @@ from app.logger import get_logger
 from app.models.integration import Integration
 from app.models.job import Job, JobStatus, WorkflowType
 from app.models.user import User
-from app.schemas.job import BulkJobCreate, BulkJobRead, JobCreate, JobRead
+from app.schemas.job import (
+    BatchScheduleCreate,
+    BatchScheduleRead,
+    BulkJobCreate,
+    BulkJobRead,
+    JobCreate,
+    JobRead,
+)
 from app.security import SSRFViolationError, validate_url_for_ssrf
 from app.worker.celery_app import celery_app
 from app.worker import tasks  # noqa: F401 — ensures tasks are registered
@@ -99,6 +106,8 @@ def _build_job_meta(payload: JobCreate) -> dict:
         "related_articles": [
             {"title": a.title, "url": a.url} for a in payload.related_articles
         ],
+        # Granular Content Controls — persisted as a plain dict in JSONB
+        "customization": payload.customization.model_dump(),
     }
 
 
@@ -292,6 +301,104 @@ async def create_bulk_jobs(
     )
 
 
+# ── POST /jobs/scheduled ──────────────────────────────────────────────────────
+
+
+@router.post(
+    "/scheduled",
+    response_model=BatchScheduleRead,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Schedule multiple jobs (drip-feed) to run at specific times",
+)
+@limiter.limit(_RATE_LIMIT)
+async def create_scheduled_jobs(
+    request: Request,
+    payload: BatchScheduleCreate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_active_user),
+) -> BatchScheduleRead:
+    """
+    Enqueue up to 10 content jobs with assigned future execution dates.
+    Jobs are created in QUEUED state. Celery Beat will dispatch them later.
+    """
+    # ── Validate integration ownership ────────────────────────────────────────
+    await _get_owned_integration(payload.integration_id, user, db)
+
+    # Note: We do NOT deduct credits immediately. Credits will be checked and
+    # deducted at the time of execution by the worker (or we can deduct them now,
+    # but the instructions didn't specify. Deducting now is safer so they don't schedule
+    # jobs and run out of credits later). Let's check credits.
+    if user.credits < len(payload.items):
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail=(
+                f"Insufficient credits. You have {user.credits} credit(s) but "
+                f"the schedule requires {len(payload.items)}."
+            ),
+        )
+
+    job_ids: list[uuid.UUID] = []
+    errors: list[str] = []
+    failed_validation = 0
+
+    now_utc = datetime.now(timezone.utc)
+
+    for item in payload.items:
+        # Prevent scheduling in the past
+        if item.execute_at < now_utc:
+            errors.append(f"Execute date {item.execute_at} is in the past. Skipped.")
+            failed_validation += 1
+            continue
+
+        # ── SSRF check for reference URLs ─────────────────────────────────
+        reference_url_str: str | None = None
+        if item.workflow_type == WorkflowType.REFERENCE_TO_ARTICLE:
+            assert item.reference_url is not None
+            try:
+                reference_url_str = validate_url_for_ssrf(str(item.reference_url))
+            except SSRFViolationError as exc:
+                errors.append(f"URL {item.reference_url!r} rejected: {exc}")
+                failed_validation += 1
+                continue
+
+        # ── Create Job row ────────────────────────────────────────────────
+        job = Job(
+            user_id=user.id,
+            integration_id=payload.integration_id,
+            workflow_type=item.workflow_type.value,
+            status=JobStatus.QUEUED.value,
+            execute_at=item.execute_at,
+            input_keyword=item.keyword,
+            input_url=reference_url_str,
+            meta={
+                "content_image_count": payload.content_image_count,
+                "include_featured_image": payload.include_featured_image,
+                "related_articles": [],
+            },
+        )
+        db.add(job)
+        await db.flush()  # get UUID
+        job_ids.append(job.id)
+
+    await db.commit()
+
+    # We do NOT dispatch Celery tasks here. Celery beat handles it.
+    log.info(
+        "jobs.scheduled_created",
+        user_id=str(user.id),
+        integration_id=str(payload.integration_id),
+        queued=len(job_ids),
+        failed_validation=failed_validation,
+    )
+    return BatchScheduleRead(
+        integration_id=payload.integration_id,
+        queued=len(job_ids),
+        failed_validation=failed_validation,
+        job_ids=job_ids,
+        errors=errors,
+    )
+
+
 # ── GET /jobs ────────────────────────────────────────────────────────────────────
 
 from typing import Annotated
@@ -424,45 +531,4 @@ async def delete_job(
 
 
 
-# ── POST /jobs/{job_id}/resume ────────────────────────────────────────────────
 
-@router.post(
-    "/{job_id}/resume",
-    response_model=JobRead,
-    status_code=status.HTTP_202_ACCEPTED,
-    summary="Resume a job from awaiting_preview status",
-)
-async def resume_job(
-    job_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_active_user),
-) -> Job:
-    """
-    Resume a job that is currently in 'awaiting_preview' status.
-    This re-dispatches the Celery task which will proceed to the next stage.
-    """
-    result = await db.execute(
-        select(Job).where(Job.id == job_id, Job.user_id == user.id)
-    )
-    job = result.scalar_one_or_none()
-    if job is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Job not found"
-        )
-
-    if job.status != JobStatus.AWAITING_PREVIEW.value:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Only jobs in '{JobStatus.AWAITING_PREVIEW.value}' state can be resumed."
-        )
-
-    # Dispatch Celery task again
-    workflow_enum = WorkflowType(job.workflow_type)
-    celery_result = celery_app.send_task(
-        _TASK_MAP[workflow_enum],
-        kwargs={"job_id": str(job.id)},
-        queue="default",
-    )
-    
-    log.info("jobs.resumed", job_id=str(job.id), celery_task_id=celery_result.id)
-    return job

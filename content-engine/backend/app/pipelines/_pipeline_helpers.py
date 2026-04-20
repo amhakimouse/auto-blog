@@ -200,14 +200,25 @@ def generate_final_html(
     analysis: dict,
     image_results: list[dict],
     logger: structlog.BoundLogger,
+    *,
+    link_candidates: list[dict] | None = None,
+    customization=None,  # ContentCustomization | None — imported lazily to avoid circular
+    language: str = "english",
 ) -> str:
     """
     Ask Gemini to write the full SEO article HTML using the unified analysis
     and the real image URLs (or inline WebP data-URIs as fallback).
 
+    Now powered by the PromptBuilder which injects:
+      - Language directive (mandatory, placed first)
+      - Smart Internal Linking instructions (if link_candidates provided)
+      - Granular Content Controls (article_type, structure, tone, image_style)
+
     IMAGE_PLACEHOLDER_N markers are injected in the prompt and then substituted
     with the final URLs before returning bleach-sanitised HTML.
     """
+    from app.ai.prompt_builder import build_article_system_prompt
+
     total_images = len(image_results)
 
     # Build placeholder → URL map
@@ -226,28 +237,36 @@ def generate_final_html(
             placeholder_map[key] = ""  # will be stripped from HTML
 
     img_instruction = (
-        "Insert exactly "
+        "IMAGES: Insert exactly "
         + str(total_images)
         + " images using these exact src values: "
         + ", ".join(
             f'<img src="IMAGE_PLACEHOLDER_{i}" alt="...">'
             for i in range(total_images)
         )
-    ) if total_images > 0 else "Do not include any images."
+    ) if total_images > 0 else ""
 
-    system_prompt = (
-        "You are an Expert SEO Copywriter.\n"
-        "Write a full, publication-ready SEO article as clean HTML "
-        "(body content only — no <html>, <head>, or <body> tags).\n"
-        "Use semantic H2/H3 headings, bullet lists where appropriate, and clear paragraphs.\n"
-        f"{img_instruction}\n"
-        "Do NOT wrap output in markdown code fences. Return raw HTML only."
+    # Assemble system prompt via PromptBuilder (language directive is first)
+    system_prompt = build_article_system_prompt(
+        link_candidates=link_candidates or [],
+        customization=customization,
+        total_images=total_images,
+        image_placeholder_instructions=img_instruction,
+        language=language,
     )
 
     user_message = (
         f"Focus Keyword: {analysis.get('focus_keyword')}\n"
         f"Title: {analysis.get('title')}\n\n"
         f"Content Plan:\n{analysis.get('markdown_content', '')}"
+    )
+
+    logger.info(
+        "pipeline_helpers.final_html.prompt_built",
+        has_links=bool(link_candidates),
+        link_count=len(link_candidates) if link_candidates else 0,
+        language=language,
+        customization=customization.model_dump() if customization else None,
     )
 
     try:

@@ -132,6 +132,86 @@ function GeneratedImagesPanel({ generatedImages }: { generatedImages: any[] }) {
   );
 }
 
+// ── Internal links info panel ──────────────────────────────────────────────────
+function InternalLinksPanel({ meta }: { meta: any }) {
+  const manualLinks = meta?.related_articles || [];
+  const hasLinks = manualLinks.length > 0;
+
+  // Only show this panel once job has started processing
+  if (!meta) return null;
+
+  return (
+    <div className="flex items-center gap-2 px-3 py-2 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg text-sm">
+      <svg className="w-4 h-4 text-blue-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+      </svg>
+      <span className="text-blue-700 dark:text-blue-300 font-medium">Internal Linking:</span>
+      <span className="text-blue-600 dark:text-blue-400">
+        {hasLinks
+          ? `${manualLinks.length} manual link${manualLinks.length > 1 ? 's' : ''} configured`
+          : 'Auto-fetching from WordPress site (Redis-cached)'}
+      </span>
+    </div>
+  );
+}
+
+// ── Granular content controls display panel ────────────────────────────────────
+function ContentControlsPanel({ customization }: { customization: any }) {
+  if (!customization) return null;
+
+  const badges = [
+    {
+      icon: '📖',
+      label: 'Type',
+      value: (customization.article_type || 'informational').replace('_', ' '),
+      color: 'bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-300',
+    },
+    {
+      icon: '🎙️',
+      label: 'Tone',
+      value: customization.tone_of_voice || 'professional',
+      color: 'bg-purple-50 dark:bg-purple-900/20 border-purple-200 dark:border-purple-800 text-purple-700 dark:text-purple-300',
+    },
+    {
+      icon: '📐',
+      label: 'Structure',
+      value: (customization.article_structure || 'standard').replace('_', ' '),
+      color: 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800 text-green-700 dark:text-green-300',
+    },
+    {
+      icon: '🖼️',
+      label: 'Images',
+      value: (customization.image_style || 'standard').replace('_', ' '),
+      color: 'bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-800 text-amber-700 dark:text-amber-300',
+    },
+  ];
+
+  // Don't show if all defaults
+  const allDefaults = (
+    (customization.article_type || 'informational') === 'informational' &&
+    (customization.tone_of_voice || 'professional') === 'professional' &&
+    (customization.article_structure || 'standard') === 'standard' &&
+    (customization.image_style || 'standard') === 'standard'
+  );
+
+  return (
+    <Card title="AI Content Controls" shadow="sm">
+      {allDefaults && (
+        <p className="text-xs text-gray-400 mb-3">Using all default settings. Customize when creating a new job.</p>
+      )}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        {badges.map(({ icon, label, value, color }) => (
+          <div key={label} className={`flex flex-col p-3 rounded-lg border ${color}`}>
+            <span className="text-lg mb-1">{icon}</span>
+            <span className="text-xs font-semibold uppercase tracking-wide opacity-70">{label}</span>
+            <span className="text-sm font-medium capitalize mt-0.5">{value}</span>
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
 // ── Live step label badge ──────────────────────────────────────────────────────
 function LiveStepLabel({ label, status }: { label?: string; status: string }) {
   if (!label || status === 'completed' || status === 'failed') return null;
@@ -458,6 +538,16 @@ export function JobDetailPage() {
 
       {/* ── Generated Images ── */}
       <GeneratedImagesPanel generatedImages={job.meta?.generated_images} />
+
+      {/* ── AI Content Controls (Granular Content Controls Feature) ── */}
+      <ContentControlsPanel customization={job.meta?.customization} />
+
+      {/* ── Internal Linking Status ── */}
+      {job.meta && (
+        <div className="space-y-2">
+          <InternalLinksPanel meta={job.meta} />
+        </div>
+      )}
 
       {/* ── Meta ── */}
       <Card shadow="sm">

@@ -68,7 +68,12 @@ celery_app.conf.update(
         # Check every 5 minutes for articles whose scheduled_publish_at has passed
         "publish-scheduled-articles": {
             "task": "app.worker.tasks.publish_scheduled_articles",
-            "schedule": 300.0,   # seconds; swap for crontab() if celery[beat] installed
+            "schedule": 300.0,   # seconds
+        },
+        # Check every hour for drip-feed scheduled jobs whose execute_at has passed
+        "process-scheduled-jobs": {
+            "task": "app.worker.tasks.process_scheduled_jobs",
+            "schedule": 3600.0,  # runs every hour (3600 seconds)
         },
     },
 )

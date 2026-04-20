@@ -3,9 +3,9 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { jobs, integrations } from '@/lib/api';
 import { Card, Button, Input, Select, Toggle, Badge, Modal, Loading, Progress, useToast } from '@/components/ui';
-import { Plus, Search, X, Eye, Loader, Trash2 } from 'lucide-react';
+import { Plus, Search, X, Eye, Loader, Trash2, Settings2, Type, Layout, Image as ImageIcon2, Mic, Globe } from 'lucide-react';
 import { format } from 'date-fns';
-import { Job, Integration } from '@/types';
+import { Job, Integration, ContentCustomization } from '@/types';
 import clsx from 'clsx';
 
 export function JobsPage() {
@@ -220,6 +220,13 @@ function CreateJobModal({ isOpen, onClose, integrationsList }: CreateJobModalPro
   const [relatedArticles, setRelatedArticles] = useState<{ title: string; url: string }[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
+  // ── Granular Content Controls state ────────────────────────────────────────
+  const [articleType, setArticleType] = useState<ContentCustomization['article_type']>('informational');
+  const [articleStructure, setArticleStructure] = useState<ContentCustomization['article_structure']>('standard');
+  const [imageStyle, setImageStyle] = useState<ContentCustomization['image_style']>('standard');
+  const [toneOfVoice, setToneOfVoice] = useState<ContentCustomization['tone_of_voice']>('professional');
+  const [language, setLanguage] = useState('english');
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const queryClient = useQueryClient();
   const { addToast } = useToast();
 
@@ -270,6 +277,13 @@ function CreateJobModal({ isOpen, onClose, integrationsList }: CreateJobModalPro
         content_image_count: contentImageCount,
         include_featured_image: includeFeaturedImage,
         related_articles: relatedArticles.filter((a) => a.title && a.url),
+        customization: {
+          article_type: articleType,
+          article_structure: articleStructure,
+          image_style: imageStyle,
+          tone_of_voice: toneOfVoice,
+          language: language,
+        },
       };
 
       await jobs.create(payload);
@@ -282,6 +296,12 @@ function CreateJobModal({ isOpen, onClose, integrationsList }: CreateJobModalPro
       setContentImageCount(3);
       setIncludeFeaturedImage(true);
       setRelatedArticles([]);
+      setArticleType('informational');
+      setArticleStructure('standard');
+      setImageStyle('standard');
+      setToneOfVoice('professional');
+      setLanguage('english');
+      setShowAdvanced(false);
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Failed to create job');
     } finally {
@@ -463,6 +483,164 @@ function CreateJobModal({ isOpen, onClose, integrationsList }: CreateJobModalPro
                 label="Include Featured Image"
               />
             </>
+          )}
+        </div>
+
+        {/* ── Granular Content Controls ── */}
+        <div className="border border-gray-200 dark:border-dark-border rounded-xl overflow-hidden">
+          <button
+            type="button"
+            onClick={() => setShowAdvanced(!showAdvanced)}
+            className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 dark:bg-gray-900/40 hover:bg-gray-100 dark:hover:bg-gray-800/60 transition-colors"
+          >
+            <div className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-300">
+              <Settings2 className="w-4 h-4 text-primary-500" />
+              AI Content Controls
+              <span className="text-xs font-normal text-gray-400 ml-1">(optional)</span>
+            </div>
+            <svg
+              className={clsx('w-4 h-4 text-gray-400 transition-transform', showAdvanced && 'rotate-180')}
+              fill="none" viewBox="0 0 24 24" stroke="currentColor"
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+
+          {showAdvanced && (
+            <div className="p-4 space-y-4 bg-white dark:bg-gray-800/30">
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                Fine-tune how the AI writes and structures your article. All fields default to standard settings.
+              </p>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {/* Article Type */}
+                <div>
+                  <label className="label flex items-center gap-1.5">
+                    <Type className="w-3.5 h-3.5 text-primary-400" />
+                    Article Type
+                  </label>
+                  <select
+                    id="article-type-select"
+                    value={articleType}
+                    onChange={(e) => setArticleType(e.target.value as ContentCustomization['article_type'])}
+                    className="input w-full text-sm"
+                  >
+                    <option value="informational">📖 Informational</option>
+                    <option value="educational">🎓 Educational</option>
+                    <option value="guide">🗺️ How-To Guide</option>
+                    <option value="course_module">📚 Course Module</option>
+                    <option value="listicle">📝 Listicle</option>
+                  </select>
+                </div>
+
+                {/* Tone of Voice */}
+                <div>
+                  <label className="label flex items-center gap-1.5">
+                    <Mic className="w-3.5 h-3.5 text-primary-400" />
+                    Tone of Voice
+                  </label>
+                  <select
+                    id="tone-of-voice-select"
+                    value={toneOfVoice}
+                    onChange={(e) => setToneOfVoice(e.target.value as ContentCustomization['tone_of_voice'])}
+                    className="input w-full text-sm"
+                  >
+                    <option value="professional">💼 Professional</option>
+                    <option value="conversational">💬 Conversational</option>
+                    <option value="witty">😄 Witty</option>
+                    <option value="academic">🔬 Academic</option>
+                  </select>
+                </div>
+
+                {/* Article Structure */}
+                <div>
+                  <label className="label flex items-center gap-1.5">
+                    <Layout className="w-3.5 h-3.5 text-primary-400" />
+                    Article Structure
+                  </label>
+                  <select
+                    id="article-structure-select"
+                    value={articleStructure}
+                    onChange={(e) => setArticleStructure(e.target.value as ContentCustomization['article_structure'])}
+                    className="input w-full text-sm"
+                  >
+                    <option value="standard">📄 Standard</option>
+                    <option value="content_cards">🃏 Content Cards</option>
+                    <option value="q_and_a">❓ Q&amp;A Format</option>
+                    <option value="step_by_step">👣 Step-by-Step</option>
+                  </select>
+                </div>
+
+                {/* Image Style */}
+                <div>
+                  <label className="label flex items-center gap-1.5">
+                    <ImageIcon2 className="w-3.5 h-3.5 text-primary-400" />
+                    Image Style
+                  </label>
+                  <select
+                    id="image-style-select"
+                    value={imageStyle}
+                    onChange={(e) => setImageStyle(e.target.value as ContentCustomization['image_style'])}
+                    className="input w-full text-sm"
+                  >
+                    <option value="standard">🖼️ Standard</option>
+                    <option value="ultra_realistic">📸 Ultra-Realistic</option>
+                    <option value="minimalist">✨ Minimalist</option>
+                    <option value="infographic">📊 Infographic</option>
+                  </select>
+                </div>
+
+                {/* Language */}
+                <div>
+                  <label className="label flex items-center gap-1.5">
+                    <Globe className="w-3.5 h-3.5 text-primary-400" />
+                    Output Language
+                  </label>
+                  <select
+                    id="language-select"
+                    value={language}
+                    onChange={(e) => setLanguage(e.target.value)}
+                    className="input w-full text-sm"
+                  >
+                    <option value="english">🇺🇸 English</option>
+                    <option value="french">🇫🇷 French</option>
+                    <option value="spanish">🇪🇸 Spanish</option>
+                    <option value="german">🇩🇪 German</option>
+                    <option value="italian">🇮🇹 Italian</option>
+                    <option value="portuguese">🇵🇹 Portuguese</option>
+                    <option value="dutch">🇳🇱 Dutch</option>
+                    <option value="arabic">🇸🇦 Arabic</option>
+                    <option value="turkish">🇹🇷 Turkish</option>
+                    <option value="polish">🇵🇱 Polish</option>
+                    <option value="russian">🇷🇺 Russian</option>
+                    <option value="japanese">🇯🇵 Japanese</option>
+                    <option value="chinese">🇨🇳 Chinese</option>
+                    <option value="korean">🇰🇷 Korean</option>
+                    <option value="hindi">🇮🇳 Hindi</option>
+                    <option value="indonesian">🇮🇩 Indonesian</option>
+                    <option value="swedish">🇸🇪 Swedish</option>
+                    <option value="norwegian">🇳🇴 Norwegian</option>
+                    <option value="danish">🇩🇰 Danish</option>
+                    <option value="finnish">🇫🇮 Finnish</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Summary badge row */}
+              <div className="flex flex-wrap gap-1.5 pt-1">
+                {[
+                  { label: articleType.replace('_', ' '), color: 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300' },
+                  { label: toneOfVoice, color: 'bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300' },
+                  { label: articleStructure.replace('_', ' '), color: 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300' },
+                  { label: imageStyle.replace('_', ' '), color: 'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300' },
+                  { label: language, color: 'bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300' },
+                ].map(({ label, color }) => (
+                  <span key={label} className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium capitalize ${color}`}>
+                    {label}
+                  </span>
+                ))}
+              </div>
+            </div>
           )}
         </div>
 

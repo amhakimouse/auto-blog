@@ -76,6 +76,14 @@ export interface Integration {
   updated_at: string;
 }
 
+export interface ContentCustomization {
+  article_type: 'informational' | 'educational' | 'guide' | 'course_module' | 'listicle';
+  article_structure: 'standard' | 'content_cards' | 'q_and_a' | 'step_by_step';
+  image_style: 'standard' | 'ultra_realistic' | 'minimalist' | 'infographic';
+  tone_of_voice: 'professional' | 'conversational' | 'witty' | 'academic';
+  language: string;
+}
+
 export interface CreateJobRequest {
   workflow_type: 'keyword_to_article' | 'reference_to_article';
   keyword?: string;
@@ -84,6 +92,7 @@ export interface CreateJobRequest {
   content_image_count?: number;
   include_featured_image?: boolean;
   related_articles?: RelatedArticle[];
+  customization?: ContentCustomization;
 }
 
 export interface RelatedArticle {
@@ -96,6 +105,20 @@ export interface CreateIntegrationRequest {
   wp_url: string;
   wp_username: string;
   wp_password: string;
+}
+
+export interface ScheduledJobItem {
+  workflow_type: 'keyword_to_article' | 'reference_to_article';
+  keyword?: string;
+  reference_url?: string;
+  execute_at: string;
+}
+
+export interface BatchScheduleCreate {
+  integration_id: string;
+  items: ScheduledJobItem[];
+  content_image_count?: number;
+  include_featured_image?: boolean;
 }
 
 export interface PaginatedResponse<T> {

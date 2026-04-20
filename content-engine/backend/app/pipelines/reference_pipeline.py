@@ -45,6 +45,15 @@ class ReferencePipeline(BasePipeline):
             0, min(int(meta.get("content_image_count", 1)), _MAX_IMAGES)
         )
         self.include_featured_image: bool = bool(meta.get("include_featured_image", True))
+        
+        # ── Granular Content Controls ─────────────────────────────────────
+        from app.schemas.job import ContentCustomization
+        raw_customization = meta.get("customization", {})
+        try:
+            self.customization = ContentCustomization.model_validate(raw_customization)
+        except Exception:
+            self.customization = ContentCustomization()
+
         self._logger: structlog.BoundLogger = log.bind(
             job_id=job_id,
             pipeline="reference",
@@ -55,10 +64,6 @@ class ReferencePipeline(BasePipeline):
 
     def run(self) -> dict:
         self._logger.info("reference_pipeline.run", status=self.job.status)
-
-        # Resume path — user approved the preview
-        if self.job.status == JobStatus.AWAITING_PREVIEW.value:
-            return self._resume_after_preview()
 
         # ── Stage 1: Scrape reference URL ──────────────────────────────────────
         self._set_step("scraping", 10, f"Extracting content from {self.url}...")
@@ -85,32 +90,70 @@ class ReferencePipeline(BasePipeline):
             content,
             num_images=num_images,
             logger=self._logger,
+            language=self.customization.language,
+            customization=self.customization,
         )
 
-        # ── Stage 4: Pause for user preview ────────────────────────────────────
+        # We no longer pause for user preview. Store analysis, continue.
         self._set_step(
-            JobStatus.AWAITING_PREVIEW.value, 60,
-            "Analysis complete — waiting for your approval...",
+            JobStatus.PROCESSING.value, 60,
+            "Analysis complete. Proceeding to asset generation...",
             meta_patch={"unified_analysis": analysis},
         )
-        return {"status": JobStatus.AWAITING_PREVIEW.value}
-
-    # ── Resume (stages 5-8) ────────────────────────────────────────────────────
-
-    def _resume_after_preview(self) -> dict:
-        meta: dict = self.job.meta or {}
-        analysis: dict | None = meta.get("unified_analysis")
-        if not analysis:
-            raise RuntimeError(
-                "Cannot resume: unified_analysis missing from job.meta. "
-                "The job may need to be re-submitted."
-            )
 
         integration = self._load_integration()
 
         # ── Stage 5: Concurrent image generation ──────────────────────────────
         num_images = self.content_image_count + (1 if self.include_featured_image else 0)
         prompts = analysis.get("image_prompts", [])[:num_images]
+
+        # ── Smart Internal Linking: fetch WP posts (Redis-cached, graceful fallback) ──
+        # Priority: manual related_articles in job.meta override auto-fetched posts.
+        link_candidates: list[dict] = []
+        manual_links = (self.job.meta or {}).get("related_articles", [])
+        if manual_links:
+            link_candidates = manual_links
+            self._logger.info(
+                "reference_pipeline.internal_links.manual",
+                count=len(link_candidates),
+            )
+        elif integration:
+            from app.ai.internal_linker import fetch_link_candidates
+            try:
+                link_candidates = fetch_link_candidates(
+                    integration_id=str(integration.id),
+                    wp_url=integration.wp_url,
+                    wp_username=integration.wp_username,
+                    wp_app_password=integration.wp_password,
+                    logger=self._logger,
+                )
+                self._logger.info(
+                    "reference_pipeline.internal_links.auto_fetched",
+                    count=len(link_candidates),
+                )
+            except Exception as exc:
+                self._logger.warning(
+                    "reference_pipeline.internal_links.fetch_failed",
+                    error=str(exc),
+                )
+
+        # ── Enhance image prompts with image_style from ContentCustomization ──
+        if self.customization.image_style != "standard" and prompts:
+            from app.ai.prompt_builder import enhance_imagen_prompt
+            prompts = [
+                {
+                    **p,
+                    "prompt": enhance_imagen_prompt(
+                        p.get("prompt", ""), self.customization.image_style
+                    ),
+                }
+                for p in prompts
+            ]
+            self._logger.info(
+                "reference_pipeline.image_prompts_enhanced",
+                style=self.customization.image_style,
+                count=len(prompts),
+            )
 
         self._set_step(
             "generating_assets", 65,
@@ -148,7 +191,14 @@ class ReferencePipeline(BasePipeline):
 
         # ── Stage 6: Final HTML structuring ───────────────────────────────────
         from app.pipelines._pipeline_helpers import generate_final_html
-        final_html = generate_final_html(analysis, image_results, self._logger)
+        final_html = generate_final_html(
+            analysis, 
+            image_results, 
+            self._logger,
+            link_candidates=link_candidates,
+            customization=self.customization,
+            language=self.customization.language,
+        )
 
         payload = {
             "title": analysis["title"],

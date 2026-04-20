@@ -6,8 +6,8 @@ reference-link→article). It is created synchronously by the API and then
 processed asynchronously by the Celery worker.
 
 Status lifecycle:
-    pending → processing → completed
-                         ↘ failed
+    queued    → pending → processing → completed
+    (drip-feed)           ⇘ failed
 """
 import uuid
 from datetime import datetime, timezone
@@ -21,7 +21,8 @@ from app.database import Base
 
 
 class JobStatus(str, Enum):
-    PENDING = "pending"
+    QUEUED = "queued"              # drip-feed: waiting for execute_at to pass
+    PENDING = "pending"            # ready for immediate dispatch
     PROCESSING = "processing"
     AWAITING_PREVIEW = "awaiting_preview"
     COMPLETED = "completed"
@@ -115,6 +116,15 @@ class Job(Base):
     )
     completed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+
+    # ── Drip-Feed Scheduling ──────────────────────────────────────────────────
+    # Set for batch-scheduled jobs. NULL means "dispatch immediately".
+    # Celery Beat polls this column hourly to trigger generation.
+    execute_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,   # indexed: Beat task queries status='queued' AND execute_at<=NOW()
     )
 
     # ── Relationships ─────────────────────────────────────────────────────────

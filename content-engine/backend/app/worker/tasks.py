@@ -344,12 +344,20 @@ def publish_article_to_wp(self, article_id: str) -> dict:
         publisher = WordPressPublisher(integration.wp_url, integration.wp_username, integration.wp_password)
         
         try:
-            # Featured image bytes if available
-            # ... (logic to find featured image from article.images if stored) ...
+            # Resolve featured image bytes if available
+            image_bytes: bytes | None = None
+            image_alt: str = article.title
+            for img in article.images or []:
+                if img.get("role") == "featured" and img.get("base64_image"):
+                    image_bytes = _b64.b64decode(img["base64_image"])
+                    image_alt = img.get("alt_text", article.title)
+                    break
             
             pub_result = _asyncio.run(publisher.publish(
                 title=article.title,
                 html_content=article.html_content,
+                image_bytes=image_bytes,
+                image_alt=image_alt,
                 slug=article.slug,
                 meta_description=article.meta_description,
                 focus_keyword=article.focus_keyword,
@@ -599,4 +607,78 @@ def publish_scheduled_articles(self) -> dict:
         "failed_ids": failed_ids,
     }
     logger.info("publish_scheduled_articles.done", **result)
+    return result
+
+
+@celery_app.task(bind=True, max_retries=1)
+def process_scheduled_jobs(self: Task) -> dict:
+    """
+    Celery Beat periodic task (runs hourly).
+    Queries jobs where status='queued' AND execute_at <= NOW().
+    Transitions them to 'pending' and dispatches the main generation pipeline.
+    """
+    logger = log.bind(task="process_scheduled_jobs")
+    logger.info("process_scheduled_jobs.started")
+
+    from app.models.job import WorkflowType
+
+    now_utc = datetime.now(timezone.utc)
+    dispatched_ids: list[str] = []
+    error_ids: list[str] = []
+
+    with _SyncSession() as db:
+        try:
+            # Query queued jobs whose execution time has arrived
+            jobs_to_process = (
+                db.query(Job)
+                .filter(Job.status == JobStatus.QUEUED.value)
+                .filter(Job.execute_at <= now_utc)
+                .all()
+            )
+
+            if not jobs_to_process:
+                logger.info("process_scheduled_jobs.no_jobs_found")
+                return {"dispatched": 0, "errors": 0}
+
+            for job in jobs_to_process:
+                job_logger = logger.bind(job_id=str(job.id))
+                try:
+                    # Transition to PENDING
+                    job.status = JobStatus.PENDING.value
+                    db.commit()
+
+                    # Dispatch the appropriate pipeline task
+                    workflow_enum = WorkflowType(job.workflow_type)
+                    task_kwargs = {"job_id": str(job.id)}
+                    
+                    from app.api.v1.jobs import _TASK_MAP
+                    celery_result = celery_app.send_task(
+                        _TASK_MAP[workflow_enum],
+                        kwargs=task_kwargs,
+                        queue="default",
+                    )
+                    
+                    job.celery_task_id = celery_result.id
+                    db.commit()
+                    
+                    dispatched_ids.append(str(job.id))
+                    job_logger.info("process_scheduled_jobs.dispatched", celery_task_id=celery_result.id)
+                except Exception as exc:
+                    job_logger.error("process_scheduled_jobs.dispatch_failed", error=str(exc))
+                    job.status = JobStatus.FAILED.value
+                    job.error_message = f"Failed to dispatch scheduled job: {exc}"
+                    db.commit()
+                    error_ids.append(str(job.id))
+
+        except Exception as exc:
+            logger.error("process_scheduled_jobs.db_query_failed", error=str(exc))
+            raise self.retry(exc=exc, countdown=60)
+
+    result = {
+        "dispatched": len(dispatched_ids),
+        "errors": len(error_ids),
+        "dispatched_ids": dispatched_ids,
+        "error_ids": error_ids,
+    }
+    logger.info("process_scheduled_jobs.done", **result)
     return result
