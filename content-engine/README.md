@@ -300,7 +300,7 @@ docker compose down -v
 
 ---
 
-## Next Steps (Implementation Roadmap)
+## Implemented RoadMap
 
 - [x] **Infrastructure** — FastAPI, PostgreSQL, Redis, Celery, Alembic (done)
 - [x] **Scraper** — `article_scraper.py`: async httpx + trafilatura (done)
@@ -311,10 +311,9 @@ docker compose down -v
 - [x] **AI: Write** — `write_article_from_outline()`: section-by-section HTML (done)
 - [x] **Pipeline** — `ReferencePipeline` fully wired end-to-end (done)
 - [x] **Pipeline** — `KeywordPipeline` fully wired end-to-end (done)
-- [ ] **Auth** — Add JWT authentication (FastAPI + passlib/bcrypt)
+- [x] **Auth** — JWT authentication implemented (FastAPI + passlib/bcrypt)
 - [x] **Imagen** — Contextual image generation per article section (done)
 - [x] **WordPress** — WP REST API publisher via httpx + Application Passwords (done)
-- [ ] **Frontend** — React components: job form, status poller, article viewer
-- [ ] **Rate Limiting** — Per-user throttling (requires auth)
-- [ ] **Monitoring** — Celery Flower service + structured log aggregation
-
+- [x] **Frontend** — React components: job form, status poller, article viewer
+- [x] **Rate Limiting** — Per-user throttling implemented
+- [x] **Monitoring** — Celery Flower service + structured log aggregation
