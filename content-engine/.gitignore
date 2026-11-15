@@ -1,6 +1,8 @@
 # Secrets — NEVER commit
 .env
 secrets/
+google_cloud_api.json
+*.pem
 
 # Python
 __pycache__/
