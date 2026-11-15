@@ -2,6 +2,8 @@
 .env
 *.env
 secrets/
+google_cloud_api.json
+*.pem
 
 # Node / JS
 node_modules/
